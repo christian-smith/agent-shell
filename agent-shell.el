@@ -90,6 +90,19 @@
 (declare-function flycheck-error-message "flycheck" (err))
 (declare-function flycheck-error-line "flycheck" (err))
 (declare-function flycheck-error-column "flycheck" (err))
+(declare-function agent-shell-codex-app-server-client-p "agent-shell-codex-app-server" (client))
+(declare-function agent-shell-codex-app-server-send-permission-response "agent-shell-codex-app-server"
+                  (&rest args))
+(declare-function agent-shell-codex-app-server-send-request "agent-shell-codex-app-server"
+                  (&rest args))
+(declare-function agent-shell-codex-app-server-shutdown "agent-shell-codex-app-server" (&rest args))
+(declare-function agent-shell-codex-app-server-interrupt "agent-shell-codex-app-server" (client))
+(declare-function agent-shell-codex-app-server-subscribe-to-errors "agent-shell-codex-app-server"
+                  (&rest args))
+(declare-function agent-shell-codex-app-server-subscribe-to-notifications "agent-shell-codex-app-server"
+                  (&rest args))
+(declare-function agent-shell-codex-app-server-subscribe-to-requests "agent-shell-codex-app-server"
+                  (&rest args))
 
 ;; Declare as special so byte-compilation doesn't turn `let' bindings into
 ;; lexical bindings (which would not affect `auto-insert' behavior).
@@ -1197,28 +1210,32 @@ See also `agent-shell-confirm-interrupt'."
   (interactive)
   (unless (derived-mode-p 'agent-shell-mode)
     (error "Not in a shell"))
-  (cond ((map-nested-elt (agent-shell--state) '(:session :id))
-         (when (or force (agent-shell-interrupt-confirmed-p))
+  (let ((client (map-elt (agent-shell--state) :client)))
+    (cond ((map-nested-elt (agent-shell--state) '(:session :id))
+           (when (or force (agent-shell-interrupt-confirmed-p))
            ;; First cancel all pending permission requests
            (map-do
             (lambda (tool-call-id tool-call-data)
               (when (map-elt tool-call-data :permission-request-id)
                 (agent-shell--send-permission-response
-                 :client (map-elt (agent-shell--state) :client)
+                 :client client
                  :request-id (map-elt tool-call-data :permission-request-id)
                  :cancelled t
-                 :state (agent-shell--state)
-                 :tool-call-id tool-call-id)))
-            (map-elt (agent-shell--state) :tool-calls))
+                  :state (agent-shell--state)
+                  :tool-call-id tool-call-id)))
+             (map-elt (agent-shell--state) :tool-calls))
            ;; Then send the cancel notification
-           (acp-send-notification
-            :client (map-elt (agent-shell--state) :client)
-            :notification (acp-make-session-cancel-notification
-                           :session-id (map-nested-elt (agent-shell--state) '(:session :id))
-                           :reason "User cancelled"))))
+           (if (and client
+                    (agent-shell-codex-app-server-client-p client))
+               (agent-shell-codex-app-server-interrupt client)
+             (acp-send-notification
+              :client client
+              :notification (acp-make-session-cancel-notification
+                             :session-id (map-nested-elt (agent-shell--state) '(:session :id))
+                             :reason "User cancelled")))))
         (t
          (agent-shell--shutdown)
-         (call-interactively #'shell-maker-interrupt))))
+         (call-interactively #'shell-maker-interrupt)))))
 
 (cl-defun agent-shell--make-shell-maker-config (&key prompt prompt-regexp)
   "Create `shell-maker' configuration with PROMPT and PROMPT-REGEXP."
@@ -2377,7 +2394,9 @@ For example, shut down ACP client."
   (unless (derived-mode-p 'agent-shell-mode)
     (error "Not in a shell"))
   (when (map-elt (agent-shell--state) :client)
-    (acp-shutdown :client (map-elt (agent-shell--state) :client))
+    (if (agent-shell-codex-app-server-client-p (map-elt (agent-shell--state) :client))
+        (agent-shell-codex-app-server-shutdown :client (map-elt (agent-shell--state) :client))
+      (acp-shutdown :client (map-elt (agent-shell--state) :client)))
     (map-put! (agent-shell--state) :client nil)
     (map-put! (agent-shell--state) :initialized nil)
     (map-put! (agent-shell--state) :authenticated nil)
@@ -3869,25 +3888,27 @@ through to `acp-send-request'."
     (nconc state (list (cons :active-requests nil))))
   (map-put! state :active-requests
             (cons request (map-elt state :active-requests)))
-  (acp-send-request
-   :client client
-   :request request
-   :buffer buffer
-   :on-success (lambda (acp-response)
-                 (map-put! state :active-requests
-                           (seq-remove (lambda (r)
-                                         (equal r request))
-                                       (map-elt state :active-requests)))
-                 (when on-success
-                   (funcall on-success acp-response)))
-   :on-failure (lambda (acp-error raw-message)
-                 (map-put! state :active-requests
-                           (seq-remove (lambda (r)
-                                         (equal r request))
-                                       (map-elt state :active-requests)))
-                 (when on-failure
-                   (funcall on-failure acp-error raw-message)))
-   :sync sync))
+  (funcall (if (agent-shell-codex-app-server-client-p client)
+               #'agent-shell-codex-app-server-send-request
+             #'acp-send-request)
+           :client client
+           :request request
+           :buffer buffer
+           :on-success (lambda (acp-response)
+                         (map-put! state :active-requests
+                                   (seq-remove (lambda (r)
+                                                 (equal r request))
+                                               (map-elt state :active-requests)))
+                         (when on-success
+                           (funcall on-success acp-response)))
+           :on-failure (lambda (acp-error raw-message)
+                         (map-put! state :active-requests
+                                   (seq-remove (lambda (r)
+                                                 (equal r request))
+                                               (map-elt state :active-requests)))
+                         (when on-failure
+                           (funcall on-failure acp-error raw-message)))
+           :sync sync))
 
 (cl-defun agent-shell--initiate-handshake (&key shell-buffer on-initiated)
   "Initiate ACP handshake with SHELL-BUFFER.
@@ -4622,32 +4643,38 @@ normalized server configs."
 
 (cl-defun agent-shell--subscribe-to-client-events (&key state)
   "Subscribe SHELL and STATE to ACP events."
-  (acp-subscribe-to-errors
-   :client (map-elt state :client)
-   :on-error (lambda (acp-error)
-               (if (agent-shell--active-requests-p state)
-                   (agent-shell--update-fragment
-                    :state state
-                    :block-id (format "%s-notices"
-                                      (map-elt state :request-count))
-                    :label-left (propertize "Notices" 'font-lock-face 'font-lock-doc-markup-face) ;;
-                    :body (or (map-elt acp-error 'message)
-                              (map-elt acp-error 'data)
-                              "Something is up ¯\\_ (ツ)_/¯")
-                    :append t)
-                 (when acp-logging-enabled
-                   (message "Agent notice (stale): %s"
-                            (or (map-elt acp-error 'message)
-                                (map-elt acp-error 'data)
-                                "Something is up ¯\\_ (ツ)_/¯"))))))
-  (acp-subscribe-to-notifications
-   :client (map-elt state :client)
-   :on-notification (lambda (acp-notification)
-                      (agent-shell--on-notification :state state :acp-notification acp-notification)))
-  (acp-subscribe-to-requests
-   :client (map-elt state :client)
-   :on-request (lambda (acp-request)
-                 (agent-shell--on-request :state state :acp-request acp-request))))
+  (funcall (if (agent-shell-codex-app-server-client-p (map-elt state :client))
+               #'agent-shell-codex-app-server-subscribe-to-errors
+             #'acp-subscribe-to-errors)
+           :client (map-elt state :client)
+           :on-error (lambda (acp-error)
+                       (if (agent-shell--active-requests-p state)
+                           (agent-shell--update-fragment
+                            :state state
+                            :block-id (format "%s-notices"
+                                              (map-elt state :request-count))
+                            :label-left (propertize "Notices" 'font-lock-face 'font-lock-doc-markup-face) ;;
+                            :body (or (map-elt acp-error 'message)
+                                      (map-elt acp-error 'data)
+                                      "Something is up ¯\\_ (ツ)_/¯")
+                            :append t)
+                         (when acp-logging-enabled
+                           (message "Agent notice (stale): %s"
+                                    (or (map-elt acp-error 'message)
+                                        (map-elt acp-error 'data)
+                                        "Something is up ¯\\_ (ツ)_/¯"))))))
+  (funcall (if (agent-shell-codex-app-server-client-p (map-elt state :client))
+               #'agent-shell-codex-app-server-subscribe-to-notifications
+             #'acp-subscribe-to-notifications)
+           :client (map-elt state :client)
+           :on-notification (lambda (acp-notification)
+                              (agent-shell--on-notification :state state :acp-notification acp-notification)))
+  (funcall (if (agent-shell-codex-app-server-client-p (map-elt state :client))
+               #'agent-shell-codex-app-server-subscribe-to-requests
+             #'acp-subscribe-to-requests)
+           :client (map-elt state :client)
+           :on-request (lambda (acp-request)
+                         (agent-shell--on-request :state state :acp-request acp-request))))
 
 (defun agent-shell--parse-file-mentions (prompt)
   "Parse @ file mentions from PROMPT string.
@@ -5543,12 +5570,18 @@ CANCELLED: Non-nil if the request was cancelled instead of selecting an option.
 STATE: The buffer-local agent-shell session state.
 TOOL-CALL-ID: The tool call identifier.
 MESSAGE-TEXT: Optional message to display after sending the response."
-  (acp-send-response
-   :client client
-   :response (acp-make-session-request-permission-response
-              :request-id request-id
-              :cancelled cancelled
-              :option-id option-id))
+  (if (agent-shell-codex-app-server-client-p client)
+      (agent-shell-codex-app-server-send-permission-response
+       :client client
+       :request-id request-id
+       :option-id option-id
+       :cancelled cancelled)
+    (acp-send-response
+     :client client
+     :response (acp-make-session-request-permission-response
+                :request-id request-id
+                :cancelled cancelled
+                :option-id option-id)))
   ;; Kill any diff buffer opened for this tool call, suppressing the
   ;; on-exit callback since the permission is already being resolved.
   (when-let ((diff-buf (map-nested-elt state (list :tool-calls tool-call-id :diff-buffer))))
