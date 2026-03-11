@@ -90,19 +90,6 @@
 (declare-function flycheck-error-message "flycheck" (err))
 (declare-function flycheck-error-line "flycheck" (err))
 (declare-function flycheck-error-column "flycheck" (err))
-(declare-function agent-shell-codex-app-server-client-p "agent-shell-codex-app-server" (client))
-(declare-function agent-shell-codex-app-server-send-permission-response "agent-shell-codex-app-server"
-                  (&rest args))
-(declare-function agent-shell-codex-app-server-send-request "agent-shell-codex-app-server"
-                  (&rest args))
-(declare-function agent-shell-codex-app-server-shutdown "agent-shell-codex-app-server" (&rest args))
-(declare-function agent-shell-codex-app-server-interrupt "agent-shell-codex-app-server" (client))
-(declare-function agent-shell-codex-app-server-subscribe-to-errors "agent-shell-codex-app-server"
-                  (&rest args))
-(declare-function agent-shell-codex-app-server-subscribe-to-notifications "agent-shell-codex-app-server"
-                  (&rest args))
-(declare-function agent-shell-codex-app-server-subscribe-to-requests "agent-shell-codex-app-server"
-                  (&rest args))
 
 ;; Declare as special so byte-compilation doesn't turn `let' bindings into
 ;; lexical bindings (which would not affect `auto-insert' behavior).
@@ -1213,26 +1200,26 @@ See also `agent-shell-confirm-interrupt'."
   (let ((client (map-elt (agent-shell--state) :client)))
     (cond ((map-nested-elt (agent-shell--state) '(:session :id))
            (when (or force (agent-shell-interrupt-confirmed-p))
-           ;; First cancel all pending permission requests
-           (map-do
-            (lambda (tool-call-id tool-call-data)
-              (when (map-elt tool-call-data :permission-request-id)
-                (agent-shell--send-permission-response
-                 :client client
-                 :request-id (map-elt tool-call-data :permission-request-id)
-                 :cancelled t
-                  :state (agent-shell--state)
-                  :tool-call-id tool-call-id)))
-             (map-elt (agent-shell--state) :tool-calls))
-           ;; Then send the cancel notification
-           (if (and client
-                    (agent-shell-codex-app-server-client-p client))
-               (agent-shell-codex-app-server-interrupt client)
-             (acp-send-notification
-              :client client
-              :notification (acp-make-session-cancel-notification
-                             :session-id (map-nested-elt (agent-shell--state) '(:session :id))
-                             :reason "User cancelled")))))
+             ;; First cancel all pending permission requests
+             (map-do
+              (lambda (tool-call-id tool-call-data)
+                (when (map-elt tool-call-data :permission-request-id)
+                  (agent-shell--send-permission-response
+                   :client client
+                   :request-id (map-elt tool-call-data :permission-request-id)
+                   :cancelled t
+                   :state (agent-shell--state)
+                   :tool-call-id tool-call-id)))
+              (map-elt (agent-shell--state) :tool-calls))
+             ;; Then send the cancel notification
+             (if (and client
+                      (agent-shell-codex-app-server-client-p client))
+                 (agent-shell-codex-app-server-interrupt client)
+               (acp-send-notification
+                :client client
+                :notification (acp-make-session-cancel-notification
+                               :session-id (map-nested-elt (agent-shell--state) '(:session :id))
+                               :reason "User cancelled")))))
         (t
          (agent-shell--shutdown)
          (call-interactively #'shell-maker-interrupt)))))
@@ -2394,9 +2381,7 @@ For example, shut down ACP client."
   (unless (derived-mode-p 'agent-shell-mode)
     (error "Not in a shell"))
   (when (map-elt (agent-shell--state) :client)
-    (if (agent-shell-codex-app-server-client-p (map-elt (agent-shell--state) :client))
-        (agent-shell-codex-app-server-shutdown :client (map-elt (agent-shell--state) :client))
-      (acp-shutdown :client (map-elt (agent-shell--state) :client)))
+    (acp-shutdown :client (map-elt (agent-shell--state) :client))
     (map-put! (agent-shell--state) :client nil)
     (map-put! (agent-shell--state) :initialized nil)
     (map-put! (agent-shell--state) :authenticated nil)
