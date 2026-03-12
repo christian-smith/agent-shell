@@ -725,6 +725,14 @@ With EXISTING-ONLY, only return existing buffers without creating."
   (insert "more")
   (agent-shell-viewport-compose-send))
 
+(defun agent-shell-viewport-reply-again ()
+  "Reply with \"again\" and send immediately."
+  (declare (modes agent-shell-viewport-view-mode))
+  (interactive)
+  (agent-shell-viewport-reply)
+  (insert "again")
+  (agent-shell-viewport-compose-send))
+
 (defun agent-shell-viewport-previous-page ()
   "Show previous interaction (request / response)."
   (declare (modes agent-shell-viewport-view-mode))
@@ -975,6 +983,7 @@ VIEWPORT-BUFFER is the viewport buffer to check."
     (define-key map (kbd "C-<tab>") #'agent-shell-viewport-cycle-session-mode)
     (define-key map (kbd "v") #'agent-shell-viewport-set-session-model)
     (define-key map (kbd "m") #'agent-shell-viewport-reply-more)
+    (define-key map (kbd "a") #'agent-shell-viewport-reply-again)
     (define-key map (kbd "s") #'agent-shell-viewport-set-session-mode)
     (define-key map (kbd "o") #'agent-shell-other-buffer)
     (define-key map (kbd "C-c C-o") #'agent-shell-other-buffer)
