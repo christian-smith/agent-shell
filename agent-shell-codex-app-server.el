@@ -35,20 +35,20 @@
 (require 'url-util)
 
 (defconst agent-shell-codex-app-server--jsonrpc-version "2.0")
+(defconst agent-shell-codex-app-server--client-name "agent-shell"
+  "Client name reported to Codex during app-server initialization.
 
-(defconst agent-shell-codex-app-server--read-programs
-  '("awk" "basename" "cat" "cut" "dirname" "fd" "file" "find" "grep" "head"
-    "jq" "less" "ls" "more" "nl" "pwd" "readlink" "realpath" "rg" "sed"
-    "sort" "stat" "tail" "tree" "uniq" "wc")
-  "Programs that should be rendered as read-only tool calls.")
+Keep this distinct from first-party Codex clients so app-server usage
+and compliance logs identify Agent Shell separately.")
 
-(defconst agent-shell-codex-app-server--read-git-subcommands
-  '("blame" "branch" "diff" "grep" "log" "ls-files" "rev-parse" "show"
-    "status")
-  "Git subcommands that should be rendered as read-only tool calls.")
+(defconst agent-shell-codex-app-server--reasoning-effort-order
+  '("none" "minimal" "low" "medium" "high" "xhigh")
+  "Preferred display order for Codex reasoning efforts.")
 
 (defvar agent-shell--version)
 (defvar agent-shell-codex-app-server--instance-count 0)
+(defvar agent-shell-codex-app-server--output-flush-interval 0.05
+  "Seconds to debounce streamed tool output updates.")
 
 (defcustom agent-shell-codex-app-server-connection-type 'pty
   "Connection type used for Codex app-server processes.
@@ -99,6 +99,9 @@ PTYs, while pipe-based startup can stall during initialization."
         (cons :pending-permissions (make-hash-table :test #'equal))
         (cons :tool-items (make-hash-table :test #'equal))
         (cons :tool-outputs (make-hash-table :test #'equal))
+        (cons :tool-output-chunks (make-hash-table :test #'equal))
+        (cons :pending-tool-output-items (make-hash-table :test #'equal))
+        (cons :tool-output-flush-timer nil)
         (cons :thread-id nil)
         (cons :active-turn-id nil)
         (cons :current-model-id nil)
@@ -145,56 +148,34 @@ PTYs, while pipe-based startup can stall during initialization."
   "Return an empty JSON object."
   (make-hash-table :test #'equal))
 
-(defun agent-shell-codex-app-server--shell-command-payload (command)
-  "Return shell payload for COMMAND when wrapped in `-c' form."
-  (when command
-    (let ((words (ignore-errors (split-string-and-unquote command))))
-      (cond
-       ((and (>= (length words) 3)
-             (member (file-name-nondirectory (car words))
-                     '("bash" "sh" "zsh"))
-             (member (cadr words) '("-c" "-lc")))
-        (nth 2 words))
-       (t command)))))
+(defun agent-shell-codex-app-server--approval-request-method-p (method)
+  "Return non-nil when METHOD is a supported approval request."
+  (member method '("item/commandExecution/requestApproval"
+                   "item/fileChange/requestApproval"
+                   "item/permissions/requestApproval"
+                   "execCommandApproval"
+                   "applyPatchApproval")))
 
-(defun agent-shell-codex-app-server--command-program (words)
-  "Return the first meaningful program name from WORDS."
-  (seq-find (lambda (word)
-              (and (not (string-empty-p word))
-                   (not (member word '("command" "env")))
-                   (not (string-match-p "\\`[[:alpha:]_][[:alnum:]_]*=.*\\'" word))
-                   (not (string-prefix-p "-" word))))
-            words))
+(defun agent-shell-codex-app-server--unsupported-request-message (method)
+  "Return an error message for unsupported server request METHOD."
+  (format "Unsupported Codex app-server request: %s" method))
 
-(defun agent-shell-codex-app-server--git-read-command-p (words)
-  "Return non-nil when WORDS describe a read-only git command."
-  (when (equal (agent-shell-codex-app-server--command-program words) "git")
-    (let* ((tail (cdr (member "git" words)))
-           (subcommand
-            (seq-find (lambda (word)
-                        (and (not (string-prefix-p "-" word))
-                             (not (string-empty-p word))
-                             (not (member word '("|")))))
-                      tail)))
-      (member subcommand agent-shell-codex-app-server--read-git-subcommands))))
+(defun agent-shell-codex-app-server--read-command-action-p (action)
+  "Return non-nil when ACTION represents a read-only command action."
+  (member (map-elt action 'type) '("read" "listFiles" "search")))
 
-(defun agent-shell-codex-app-server--read-command-p (command)
-  "Return non-nil when COMMAND is clearly a read-only shell command."
-  (when-let* ((payload (agent-shell-codex-app-server--shell-command-payload command))
-              (words (ignore-errors (split-string-and-unquote payload)))
-              ((not (seq-some (lambda (word)
-                                (or (member word '("&&" "||" ";" "&" "tee" "sponge"))
-                                    (string-match-p "[<>]" word)))
-                              words)))
-              (program (agent-shell-codex-app-server--command-program words)))
-    (or (member program agent-shell-codex-app-server--read-programs)
-        (agent-shell-codex-app-server--git-read-command-p words))))
-
-(defun agent-shell-codex-app-server--command-kind (command)
-  "Return the tool kind that best matches COMMAND."
-  (if (agent-shell-codex-app-server--read-command-p command)
+(defun agent-shell-codex-app-server--command-actions-kind (actions)
+  "Return the tool kind that best matches command ACTIONS."
+  (if (and actions
+           (seq-every-p #'agent-shell-codex-app-server--read-command-action-p
+                        actions))
       "read"
     "execute"))
+
+(defun agent-shell-codex-app-server--command-kind (item)
+  "Return the tool kind that best matches command execution ITEM."
+  (agent-shell-codex-app-server--command-actions-kind
+   (map-elt item 'commandActions)))
 
 (defun agent-shell-codex-app-server--callback-buffer (client &optional buffer)
   "Return a live callback buffer for CLIENT, preferring BUFFER."
@@ -204,8 +185,8 @@ PTYs, while pipe-based startup can stall during initialization."
 
 (defun agent-shell-codex-app-server--call-with-buffer (client buffer callback &rest args)
   "Invoke CALLBACK for CLIENT in BUFFER context with ARGS."
-  (if-let ((target-buffer (agent-shell-codex-app-server--callback-buffer
-                           client buffer)))
+  (if-let* ((target-buffer (agent-shell-codex-app-server--callback-buffer
+                            client buffer)))
       (with-current-buffer target-buffer
         (apply callback args))
     (apply callback args)))
@@ -228,7 +209,7 @@ PTYs, while pipe-based startup can stall during initialization."
 The wrapper disables canonical mode and terminal echo before `exec'-ing
 the actual Codex command. This avoids long JSON-RPC request lines being
 held up or dropped by the PTY line discipline."
-  (when-let ((shell (agent-shell-codex-app-server--pty-wrapper-shell)))
+  (when-let* ((shell (agent-shell-codex-app-server--pty-wrapper-shell)))
     (list shell
           "-lc"
           (format "stty raw -echo < /dev/tty && exec %s"
@@ -277,7 +258,7 @@ held up or dropped by the PTY line discipline."
   (let ((pending-requests (map-elt client :pending-requests)))
     (maphash
      (lambda (_id pending)
-       (when-let ((on-failure (map-elt pending :on-failure)))
+       (when-let* ((on-failure (map-elt pending :on-failure)))
          (agent-shell-codex-app-server--call-with-buffer
           client
           (map-elt pending :buffer)
@@ -377,6 +358,23 @@ held up or dropped by the PTY line discipline."
      (id . ,request-id)
      (result . ,result))))
 
+(cl-defun agent-shell-codex-app-server--send-rpc-error (&key client
+                                                             request-id
+                                                             code
+                                                             message
+                                                             data)
+  "Send a JSON-RPC error for REQUEST-ID via CLIENT."
+  (agent-shell-codex-app-server--ensure-started client)
+  (let ((error `((code . ,code)
+                 (message . ,message))))
+    (when data
+      (setq error (append error `((data . ,data)))))
+    (agent-shell-codex-app-server--write-message
+     client
+     `((jsonrpc . ,agent-shell-codex-app-server--jsonrpc-version)
+       (id . ,request-id)
+       (error . ,error)))))
+
 (cl-defun agent-shell-codex-app-server--send-rpc-notification (&key client
                                                                     method
                                                                     params)
@@ -419,11 +417,125 @@ held up or dropped by the PTY line discipline."
              (string-prefix-p "file://" uri))
     (url-unhex-string (string-remove-prefix "file://" uri))))
 
+(defun agent-shell-codex-app-server--model-id (model)
+  "Return the canonical identifier for MODEL."
+  (or (map-elt model 'model)
+      (map-elt model 'id)))
+
+(defun agent-shell-codex-app-server--find-model (client &optional model-id)
+  "Return CLIENT model matching MODEL-ID, or the current model."
+  (let ((target-id (or model-id
+                       (map-elt client :current-model-id))))
+    (seq-find (lambda (model)
+                (equal (agent-shell-codex-app-server--model-id model)
+                       target-id))
+              (map-elt client :available-models))))
+
+(defun agent-shell-codex-app-server--reasoning-effort-supported-p (client effort &optional model-id)
+  "Return non-nil when EFFORT is supported for CLIENT MODEL-ID."
+  (when effort
+    (if-let* ((model (agent-shell-codex-app-server--find-model client model-id))
+              (options (append (or (map-elt model 'supportedReasoningEfforts) '()) nil)))
+        (seq-some (lambda (option)
+                    (equal (map-elt option 'reasoningEffort) effort))
+                  options)
+      t)))
+
+(defun agent-shell-codex-app-server--default-reasoning-effort (client &optional model-id)
+  "Return the default reasoning effort for CLIENT MODEL-ID."
+  (or (map-elt (agent-shell-codex-app-server--find-model client model-id)
+               'defaultReasoningEffort)
+      (map-elt client :reasoning-effort)
+      "medium"))
+
+(defun agent-shell-codex-app-server--resolve-reasoning-effort (client &optional model-id effort)
+  "Return the best reasoning effort for CLIENT MODEL-ID and EFFORT."
+  (let ((candidate (or effort
+                       (map-elt client :reasoning-effort))))
+    (if (agent-shell-codex-app-server--reasoning-effort-supported-p
+         client candidate model-id)
+        candidate
+      (agent-shell-codex-app-server--default-reasoning-effort
+       client model-id))))
+
+(defun agent-shell-codex-app-server--reasoning-mode-id (effort)
+  "Return the synthetic mode identifier for EFFORT."
+  (when effort
+    (format "reasoning:%s" effort)))
+
+(defun agent-shell-codex-app-server--mode-id-to-reasoning-effort (mode-id)
+  "Return the reasoning effort encoded in MODE-ID."
+  (when (and (stringp mode-id)
+             (string-prefix-p "reasoning:" mode-id))
+    (string-remove-prefix "reasoning:" mode-id)))
+
+(defun agent-shell-codex-app-server--reasoning-mode-name (effort)
+  "Return the display name for reasoning EFFORT."
+  (pcase effort
+    ("xhigh" "XHigh")
+    (_ (capitalize (or effort "")))))
+
+(defun agent-shell-codex-app-server--reasoning-mode-description (client effort)
+  "Return a mode description for CLIENT reasoning EFFORT."
+  (or (seq-some
+       (lambda (model)
+         (when-let* ((option
+                      (seq-find (lambda (entry)
+                                  (equal (map-elt entry 'reasoningEffort)
+                                         effort))
+                                (append (or (map-elt model 'supportedReasoningEfforts) '())
+                                        nil))))
+           (map-elt option 'description)))
+       (map-elt client :available-models))
+      (format "Reasoning effort: %s"
+              (downcase (agent-shell-codex-app-server--reasoning-mode-name effort)))))
+
+(defun agent-shell-codex-app-server--translate-modes (client &optional model-id effort)
+  "Translate CLIENT reasoning settings into ACP-style session modes."
+  (let* ((current-effort
+          (agent-shell-codex-app-server--resolve-reasoning-effort
+           client model-id effort))
+         (available-modes
+          (delq nil
+                (mapcar
+                 (lambda (supported-effort)
+                   (when (seq-some
+                          (lambda (model)
+                            (agent-shell-codex-app-server--reasoning-effort-supported-p
+                             client supported-effort
+                             (agent-shell-codex-app-server--model-id model)))
+                          (map-elt client :available-models))
+                     `((id . ,(agent-shell-codex-app-server--reasoning-mode-id
+                               supported-effort))
+                       (name . ,(agent-shell-codex-app-server--reasoning-mode-name
+                                 supported-effort))
+                       (description . ,(agent-shell-codex-app-server--reasoning-mode-description
+                                        client supported-effort)))))
+                 agent-shell-codex-app-server--reasoning-effort-order))))
+    `((currentModeId . ,(agent-shell-codex-app-server--reasoning-mode-id
+                         current-effort))
+      (availableModes . ,(or available-modes
+                             (when current-effort
+                               (list `((id . ,(agent-shell-codex-app-server--reasoning-mode-id
+                                               current-effort))
+                                       (name . ,(agent-shell-codex-app-server--reasoning-mode-name
+                                                 current-effort))
+                                       (description . ,(agent-shell-codex-app-server--reasoning-mode-description
+                                                        client current-effort))))))))))
+
+(defun agent-shell-codex-app-server--dispatch-current-mode-update (client effort)
+  "Notify CLIENT that the current reasoning EFFORT changed."
+  (agent-shell-codex-app-server--dispatch-notification
+   client
+   `((method . "session/update")
+     (params . ((update . ((sessionUpdate . "current_mode_update")
+                           (currentModeId . ,(agent-shell-codex-app-server--reasoning-mode-id
+                                              effort)))))))))
+
 (defun agent-shell-codex-app-server--translate-models (models)
   "Translate MODELS to the shape used by agent-shell."
   (mapcar (lambda (model)
-            `((modelId . ,(or (map-elt model 'model)
-                              (map-elt model 'id)))
+            `((modelId . ,(agent-shell-codex-app-server--model-id model))
               (name . ,(or (map-elt model 'displayName)
                            (map-elt model 'model)
                            (map-elt model 'id)))
@@ -439,12 +551,19 @@ held up or dropped by the PTY line discipline."
                        (map-elt (seq-find (lambda (model)
                                             (map-elt model 'isDefault))
                                           (map-elt client :available-models))
-                                'model))))
+                                'model)))
+         (reasoning-effort
+          (agent-shell-codex-app-server--resolve-reasoning-effort
+           client
+           model-id
+           (or (map-elt result 'reasoningEffort)
+               (map-elt client :reasoning-effort)))))
     (map-put! client :thread-id thread-id)
     (map-put! client :current-model-id model-id)
-    (map-put! client :reasoning-effort (or (map-elt result 'reasoningEffort)
-                                           (map-elt client :reasoning-effort)))
+    (map-put! client :reasoning-effort reasoning-effort)
     `((sessionId . ,thread-id)
+      (modes . ,(agent-shell-codex-app-server--translate-modes
+                 client model-id reasoning-effort))
       (models . ((currentModelId . ,model-id)
                  (availableModels . ,(agent-shell-codex-app-server--translate-models
                                       (or (map-elt client :available-models) '()))))))))
@@ -476,7 +595,7 @@ held up or dropped by the PTY line discipline."
 
 (defun agent-shell-codex-app-server--alist-put (alist key value)
   "Return ALIST with KEY set to VALUE."
-  (if-let ((cell (assoc key alist)))
+  (if-let* ((cell (assoc key alist)))
       (progn
         (setcdr cell value)
         alist)
@@ -488,7 +607,7 @@ held up or dropped by the PTY line discipline."
     ("commandExecution"
      (let ((command (or (map-elt item 'command) "Run command")))
        `((:title . ,command)
-         (:kind . ,(agent-shell-codex-app-server--command-kind command))
+         (:kind . ,(agent-shell-codex-app-server--command-kind item))
          (:command . ,command)
          (:description . ,command)
          (:raw-input . ((command . ,command)
@@ -553,11 +672,26 @@ held up or dropped by the PTY line discipline."
       (error
        (format "%S" value)))))
 
+(defun agent-shell-codex-app-server--error-message-text (value)
+  "Return a human-readable string for app-server error VALUE."
+  (cond
+   ((stringp value) value)
+   ((or (hash-table-p value)
+        (and (listp value) value))
+    (or (let ((message (map-elt value 'message)))
+          (and (stringp message) message))
+        (let ((error (map-elt value 'error)))
+          (and (stringp error) error))
+        (agent-shell-codex-app-server--render-json value)))
+   ((null value) nil)
+   (t
+    (format "%s" value))))
+
 (defun agent-shell-codex-app-server--result-text (item)
   "Extract human-readable result text from ITEM."
   (let ((result (map-elt item 'result)))
     (or
-     (when-let ((content (map-elt result 'content)))
+     (when-let* ((content (map-elt result 'content)))
        (string-join
         (delq nil
               (mapcar (lambda (entry)
@@ -568,9 +702,9 @@ held up or dropped by the PTY line discipline."
                          (t (agent-shell-codex-app-server--render-json entry))))
                       content))
         "\n\n"))
-     (when-let ((structured (map-elt result 'structuredContent)))
+     (when-let* ((structured (map-elt result 'structuredContent)))
        (agent-shell-codex-app-server--render-json structured))
-     (when-let ((error (map-elt item 'error)))
+     (when-let* ((error (map-elt item 'error)))
        (agent-shell-codex-app-server--render-json error))
      (when (and (equal (map-elt item 'type) "webSearch")
                 (map-nested-elt item '(action url)))
@@ -579,7 +713,7 @@ held up or dropped by the PTY line discipline."
 (defun agent-shell-codex-app-server--tool-content (client item)
   "Build tool-call content for ITEM using CLIENT state."
   (let* ((item-id (map-elt item 'id))
-         (output (or (gethash item-id (map-elt client :tool-outputs))
+         (output (or (agent-shell-codex-app-server--tool-output-text client item-id)
                      (map-elt item 'aggregatedOutput)
                      (agent-shell-codex-app-server--result-text item))))
     (append (when (and output (not (string-empty-p output)))
@@ -653,19 +787,67 @@ held up or dropped by the PTY line discipline."
 (defun agent-shell-codex-app-server--translate-command-output (client params)
   "Translate command output PARAMS to a tool_call_update."
   (let* ((item-id (map-elt params 'itemId))
-         (delta (or (map-elt params 'delta) ""))
-         (outputs (map-elt client :tool-outputs))
-         (current (gethash item-id outputs "")))
-    (puthash item-id (concat current delta) outputs)
-    (when-let ((entry (agent-shell-codex-app-server--get-tool-entry client item-id)))
-      `((method . "session/update")
-        (params . ((update . ((sessionUpdate . "tool_call_update")
-                              (toolCallId . ,item-id)
-                              (title . ,(map-elt entry :title))
-                              (status . ,(map-elt entry :status))
-                              (kind . ,(map-elt entry :kind))
-                              (rawInput . ,(or (map-elt entry :raw-input) '()))
-                              (content . (((content . ((text . ,(gethash item-id outputs)))))))))))))))
+         (delta (or (map-elt params 'delta) "")))
+    (unless (string-empty-p delta)
+      (puthash item-id
+               (cons delta (gethash item-id (map-elt client :tool-output-chunks)))
+               (map-elt client :tool-output-chunks)))
+    (if (or (null agent-shell-codex-app-server--output-flush-interval)
+            (<= agent-shell-codex-app-server--output-flush-interval 0))
+        (agent-shell-codex-app-server--tool-output-update client item-id)
+      (puthash item-id t (map-elt client :pending-tool-output-items))
+      (agent-shell-codex-app-server--schedule-tool-output-flush client)
+      nil)))
+
+(defun agent-shell-codex-app-server--tool-output-text (client item-id)
+  "Return accumulated output text for ITEM-ID in CLIENT."
+  (or (gethash item-id (map-elt client :tool-outputs))
+      (when-let* ((chunks (gethash item-id (map-elt client :tool-output-chunks))))
+        (mapconcat #'identity (reverse chunks) ""))))
+
+(defun agent-shell-codex-app-server--tool-output-update (client item-id)
+  "Build a `tool_call_update' notification for ITEM-ID in CLIENT."
+  (when-let* ((entry (agent-shell-codex-app-server--get-tool-entry client item-id)))
+    `((method . "session/update")
+      (params . ((update . ((sessionUpdate . "tool_call_update")
+                            (toolCallId . ,item-id)
+                            (title . ,(map-elt entry :title))
+                            (status . ,(map-elt entry :status))
+                            (kind . ,(map-elt entry :kind))
+                            (rawInput . ,(or (map-elt entry :raw-input) '()))
+                            (content . (((content . ((text . ,(or (agent-shell-codex-app-server--tool-output-text
+                                                                   client
+                                                                   item-id)
+                                                                  ""))))))))))))))
+
+(defun agent-shell-codex-app-server--cancel-tool-output-flush (client)
+  "Cancel any pending streamed tool output flush for CLIENT."
+  (when-let* ((timer (map-elt client :tool-output-flush-timer)))
+    (cancel-timer timer)
+    (map-put! client :tool-output-flush-timer nil)))
+
+(defun agent-shell-codex-app-server--flush-tool-output-updates (client)
+  "Dispatch all queued streamed tool output updates for CLIENT."
+  (let ((pending-items (map-elt client :pending-tool-output-items))
+        item-ids)
+    (map-put! client :tool-output-flush-timer nil)
+    (maphash (lambda (item-id _value)
+               (push item-id item-ids))
+             pending-items)
+    (clrhash pending-items)
+    (dolist (item-id (nreverse item-ids))
+      (when-let* ((notification
+                   (agent-shell-codex-app-server--tool-output-update client item-id)))
+        (agent-shell-codex-app-server--dispatch-notification client notification)))))
+
+(defun agent-shell-codex-app-server--schedule-tool-output-flush (client)
+  "Schedule a debounced streamed tool output flush for CLIENT."
+  (unless (map-elt client :tool-output-flush-timer)
+    (map-put! client :tool-output-flush-timer
+              (run-at-time agent-shell-codex-app-server--output-flush-interval
+                           nil
+                           #'agent-shell-codex-app-server--flush-tool-output-updates
+                           client))))
 
 (defun agent-shell-codex-app-server--usage-notification (token-usage)
   "Translate TOKEN-USAGE to an ACP-like usage update."
@@ -734,7 +916,7 @@ held up or dropped by the PTY line discipline."
               (pending (cdr pending-request)))
     (remhash request-id (map-elt client :pending-requests))
     (map-put! client :interrupt-next-turn t)
-    (when-let ((on-failure (map-elt pending :on-failure)))
+    (when-let* ((on-failure (map-elt pending :on-failure)))
       (agent-shell-codex-app-server--call-with-buffer
        client
        (map-elt pending :buffer)
@@ -763,10 +945,10 @@ held up or dropped by the PTY line discipline."
     ("text"
      `((type . "text")
        (text . ,(or (map-elt block 'text) ""))
-       (text_elements . [])))
+       (textElements . [])))
     ("image"
-     (if-let ((path (agent-shell-codex-app-server--file-uri-to-path
-                     (map-elt block 'uri))))
+     (if-let* ((path (agent-shell-codex-app-server--file-uri-to-path
+                      (map-elt block 'uri))))
          `((type . "localImage")
            (path . ,path))
        `((type . "image")
@@ -780,21 +962,21 @@ held up or dropped by the PTY line discipline."
            (path . ,path))
        `((type . "text")
          (text . "")
-         (text_elements . []))))
+         (textElements . []))))
     ("resource_link"
-     (if-let ((path (agent-shell-codex-app-server--file-uri-to-path
-                     (map-elt block 'uri))))
+     (if-let* ((path (agent-shell-codex-app-server--file-uri-to-path
+                      (map-elt block 'uri))))
          `((type . "mention")
            (name . ,(or (map-elt block 'name)
                         (file-name-nondirectory path)))
            (path . ,path))
        `((type . "text")
          (text . "")
-         (text_elements . []))))
+         (textElements . []))))
     (_
      `((type . "text")
        (text . "")
-       (text_elements . [])))))
+       (textElements . [])))))
 
 (defun agent-shell-codex-app-server--translate-prompt-blocks (prompt-blocks)
   "Translate ACP PROMPT-BLOCKS to Codex app-server user input."
@@ -854,7 +1036,7 @@ held up or dropped by the PTY line discipline."
                       (agent-shell-codex-app-server--empty-granted-permissions)))
          (options (list
                    (agent-shell-codex-app-server--make-option
-                   "allow_once" "Allow" "grant")
+                    "allow_once" "Allow" "grant")
                    (agent-shell-codex-app-server--make-option
                     "allow_always" "Always Allow" "grantForSession")
                    (agent-shell-codex-app-server--make-option
@@ -872,19 +1054,41 @@ held up or dropped by the PTY line discipline."
   (let (options payloads)
     (cl-loop for decision in decisions
              for index from 0
-             when-let* ((spec (agent-shell-codex-app-server--decision-option-spec
-                               decision))
-                        (option-id (format "decision-%s" index)))
-             do (push (agent-shell-codex-app-server--make-option
-                       (map-elt spec :kind)
-                       (map-elt spec :name)
-                       option-id)
-                      options)
-             do (push (cons option-id
-                            `((decision . ,(map-elt spec :payload))))
-                      payloads))
+             do (when-let* ((spec (agent-shell-codex-app-server--decision-option-spec
+                                   decision))
+                            (option-id (format "decision-%s" index)))
+                  (push (agent-shell-codex-app-server--make-option
+                         (map-elt spec :kind)
+                         (map-elt spec :name)
+                         option-id)
+                        options)
+                  (push (cons option-id
+                              `((decision . ,(map-elt spec :payload))))
+                        payloads)))
     `((:options . ,(nreverse options))
       (:payloads . ,(nreverse payloads)))))
+
+(defun agent-shell-codex-app-server--request-decisions (method params)
+  "Return supported decision options for METHOD and PARAMS.
+
+File-change approvals do not surface explicit cancel buttons because
+`agent-shell' diff acceptance resolves the first `allow_once' action,
+which would otherwise collide with a transport-local cancel shim."
+  (let* ((decisions
+          (or (map-elt params 'availableDecisions)
+              (pcase method
+                ((or "item/commandExecution/requestApproval"
+                     "item/fileChange/requestApproval")
+                 '("accept" "acceptForSession" "decline" "cancel"))
+                ((or "execCommandApproval" "applyPatchApproval")
+                 '("approved" "approved_for_session" "denied" "abort"))
+                (_ nil)))))
+    (if (member method '("item/fileChange/requestApproval" "applyPatchApproval"))
+        (seq-remove (lambda (decision)
+                      (and (stringp decision)
+                           (member decision '("cancel" "abort"))))
+                    decisions)
+      decisions)))
 
 (defun agent-shell-codex-app-server--request-options (method params)
   "Translate app-server METHOD and PARAMS into ACP permission options.
@@ -893,14 +1097,7 @@ Return an alist containing `:options' and `:payloads'."
   (if (equal method "item/permissions/requestApproval")
       (agent-shell-codex-app-server--permissions-request-options params)
     (agent-shell-codex-app-server--decision-options
-     (or (map-elt params 'availableDecisions)
-         (pcase method
-           ((or "item/commandExecution/requestApproval"
-                "item/fileChange/requestApproval")
-            '("accept" "acceptForSession" "decline" "cancel"))
-           ((or "execCommandApproval" "applyPatchApproval")
-            '("approved" "approved_for_session" "denied" "abort"))
-           (_ nil))))))
+     (agent-shell-codex-app-server--request-decisions method params))))
 
 (defun agent-shell-codex-app-server--approval-title (method params)
   "Build a permission title for METHOD with PARAMS."
@@ -921,10 +1118,12 @@ Return an alist containing `:options' and `:payloads'."
     (_ (or (map-elt params 'reason)
            method))))
 
-(defun agent-shell-codex-app-server--approval-kind (method)
-  "Return an ACP-like tool kind for app-server METHOD."
+(defun agent-shell-codex-app-server--approval-kind (method params)
+  "Return an ACP-like tool kind for app-server METHOD and PARAMS."
   (pcase method
-    ((or "item/commandExecution/requestApproval" "execCommandApproval") "execute")
+    ((or "item/commandExecution/requestApproval" "execCommandApproval")
+     (agent-shell-codex-app-server--command-actions-kind
+      (map-elt params 'commandActions)))
     ((or "item/fileChange/requestApproval" "applyPatchApproval") "edit")
     (_ "tool")))
 
@@ -969,7 +1168,7 @@ Return an alist containing `:options' and `:payloads'."
             (params . ((toolCall . ((toolCallId . ,tool-call-id)
                                     (title . ,(agent-shell-codex-app-server--approval-title method params))
                                     (status . "in_progress")
-                                    (kind . ,(agent-shell-codex-app-server--approval-kind method))
+                                    (kind . ,(agent-shell-codex-app-server--approval-kind method params))
                                     (rawInput . ,(or (agent-shell-codex-app-server--approval-raw-input method params)
                                                      '()))))
                        (options . ,(map-elt request-options :options)))))))
@@ -980,10 +1179,10 @@ Return an alist containing `:options' and `:payloads'."
 
 (defun agent-shell-codex-app-server--respond-to-pending-prompt (client turn)
   "Resolve the active prompt in CLIENT using TURN."
-  (when-let ((pending (map-elt client :pending-prompt)))
+  (when-let* ((pending (map-elt client :pending-prompt)))
     (map-put! client :pending-prompt nil)
     (map-put! client :active-turn-id nil)
-    (when-let ((on-success (map-elt pending :on-success)))
+    (when-let* ((on-success (map-elt pending :on-success)))
       (agent-shell-codex-app-server--call-with-buffer
        client
        (map-elt pending :buffer)
@@ -995,7 +1194,7 @@ Return an alist containing `:options' and `:payloads'."
   (seq-map (lambda (entry)
              (if (map-elt entry 'content)
                  entry
-               (if-let ((step (map-elt entry 'step)))
+               (if-let* ((step (map-elt entry 'step)))
                    (cons (cons 'content step) entry)
                  entry)))
            entries))
@@ -1004,8 +1203,8 @@ Return an alist containing `:options' and `:payloads'."
   "Handle app-server NOTIFICATION for CLIENT."
   (pcase (map-elt notification 'method)
     ("codex/event/task_started"
-     (when-let ((turn-id (or (map-nested-elt notification '(msg turn_id))
-                             (map-elt notification 'id))))
+     (when-let* ((turn-id (or (map-nested-elt notification '(msg turn_id))
+                              (map-elt notification 'id))))
        (map-put! client :active-turn-id turn-id)))
     ("codex/event/task_complete"
      (let ((turn-id (or (map-nested-elt notification '(msg turn_id))
@@ -1027,8 +1226,10 @@ Return an alist containing `:options' and `:payloads'."
                    (modelContextWindow . ,(map-elt info 'model_context_window))))))
     ("error"
      (let* ((params (or (map-elt notification 'params) '()))
-            (message (or (map-elt params 'message)
-                         (map-elt params 'error)
+            (message (or (agent-shell-codex-app-server--error-message-text
+                          (map-elt params 'message))
+                         (agent-shell-codex-app-server--error-message-text
+                          (map-elt params 'error))
                          "Codex app-server error")))
        (agent-shell-codex-app-server--call-error-handlers client message params)))
     ("thread/started"
@@ -1036,7 +1237,7 @@ Return an alist containing `:options' and `:payloads'."
                (or (map-nested-elt notification '(params thread id))
                    (map-nested-elt notification '(params threadId)))))
     ("turn/started"
-     (when-let ((turn-id (map-nested-elt notification '(params turn id))))
+     (when-let* ((turn-id (map-nested-elt notification '(params turn id))))
        (map-put! client :active-turn-id turn-id)
        (when (map-elt client :interrupt-next-turn)
          (map-put! client :interrupt-next-turn nil)
@@ -1045,8 +1246,8 @@ Return an alist containing `:options' and `:payloads'."
     ("thread/tokenUsage/updated"
      (let ((token-usage (map-nested-elt notification '(params tokenUsage))))
        (map-put! client :latest-token-usage token-usage)
-       (when-let ((translated
-                   (agent-shell-codex-app-server--usage-notification token-usage)))
+       (when-let* ((translated
+                    (agent-shell-codex-app-server--usage-notification token-usage)))
          (agent-shell-codex-app-server--dispatch-notification client translated))))
     ("turn/plan/updated"
      (agent-shell-codex-app-server--dispatch-notification
@@ -1086,21 +1287,30 @@ Return an alist containing `:options' and `:payloads'."
           (agent-shell-codex-app-server--translate-tool-notification
            "tool_call" client item "inProgress")))))
     ("item/commandExecution/outputDelta"
-     (when-let ((translated
-                 (agent-shell-codex-app-server--translate-command-output
-                  client (map-elt notification 'params))))
+     (when-let* ((translated
+                  (agent-shell-codex-app-server--translate-command-output
+                   client (map-elt notification 'params))))
        (agent-shell-codex-app-server--dispatch-notification client translated)))
     ("item/fileChange/outputDelta"
-     (when-let ((translated
-                 (agent-shell-codex-app-server--translate-command-output
-                  client (map-elt notification 'params))))
+     (when-let* ((translated
+                  (agent-shell-codex-app-server--translate-command-output
+                   client (map-elt notification 'params))))
        (agent-shell-codex-app-server--dispatch-notification client translated)))
     ("item/completed"
      (let ((item (map-nested-elt notification '(params item))))
        (when (member (map-elt item 'type)
                      '("commandExecution" "fileChange" "mcpToolCall" "dynamicToolCall" "webSearch"))
-         (when-let ((output (map-elt item 'aggregatedOutput)))
-           (puthash (map-elt item 'id) output (map-elt client :tool-outputs)))
+         (let ((item-id (map-elt item 'id)))
+           (if-let* ((output (map-elt item 'aggregatedOutput)))
+               (puthash item-id output (map-elt client :tool-outputs))
+             (when-let* ((output
+                          (agent-shell-codex-app-server--tool-output-text
+                           client item-id)))
+               (puthash item-id output (map-elt client :tool-outputs))))
+           (remhash item-id (map-elt client :tool-output-chunks))
+           (remhash item-id (map-elt client :pending-tool-output-items))
+           (when (zerop (hash-table-count (map-elt client :pending-tool-output-items)))
+             (agent-shell-codex-app-server--cancel-tool-output-flush client)))
          (agent-shell-codex-app-server--dispatch-notification
           client
           (agent-shell-codex-app-server--translate-tool-notification
@@ -1129,8 +1339,8 @@ Return an alist containing `:options' and `:payloads'."
          (pending (gethash id (map-elt client :pending-requests))))
     (when pending
       (remhash id (map-elt client :pending-requests))
-      (if-let ((error (map-elt response 'error)))
-          (when-let ((on-failure (map-elt pending :on-failure)))
+      (if-let* ((error (map-elt response 'error)))
+          (when-let* ((on-failure (map-elt pending :on-failure)))
             (agent-shell-codex-app-server--call-with-buffer
              client
              (map-elt pending :buffer)
@@ -1140,7 +1350,7 @@ Return an alist containing `:options' and `:payloads'."
                   "Codex app-server request failed")
               error)
              response))
-        (when-let ((on-success (map-elt pending :on-success)))
+        (when-let* ((on-success (map-elt pending :on-success)))
           (agent-shell-codex-app-server--call-with-buffer
            client
            (map-elt pending :buffer)
@@ -1152,9 +1362,23 @@ Return an alist containing `:options' and `:payloads'."
   (cond
    ((and (map-contains-key message 'method)
          (map-contains-key message 'id))
-    (agent-shell-codex-app-server--dispatch-request
-     client
-     (agent-shell-codex-app-server--translate-request client message)))
+    (if (agent-shell-codex-app-server--approval-request-method-p
+         (map-elt message 'method))
+        (agent-shell-codex-app-server--dispatch-request
+         client
+         (agent-shell-codex-app-server--translate-request client message))
+      (let ((error-message
+             (agent-shell-codex-app-server--unsupported-request-message
+              (map-elt message 'method))))
+        (agent-shell-codex-app-server--send-rpc-error
+         :client client
+         :request-id (map-elt message 'id)
+         :code -32601
+         :message error-message)
+        (agent-shell-codex-app-server--call-error-handlers
+         client
+         error-message
+         message))))
    ((map-contains-key message 'method)
     (agent-shell-codex-app-server--handle-notification client message))
    ((map-contains-key message 'id)
@@ -1226,8 +1450,10 @@ Return an alist containing `:options' and `:payloads'."
 (defun agent-shell-codex-app-server--process-sentinel (client event)
   "Handle CLIENT process EVENT."
   (unless (process-live-p (map-elt client :process))
-    (when-let ((pending (map-elt client :pending-prompt))
-               (on-failure (map-elt pending :on-failure)))
+    (agent-shell-codex-app-server--cancel-tool-output-flush client)
+    (clrhash (map-elt client :pending-tool-output-items))
+    (when-let* ((pending (map-elt client :pending-prompt))
+                (on-failure (map-elt pending :on-failure)))
       (agent-shell-codex-app-server--call-with-buffer
        client
        (map-elt pending :buffer)
@@ -1275,20 +1501,41 @@ Return an alist containing `:options' and `:payloads'."
         (alist-get :request-handlers client))
   on-request)
 
-(defun agent-shell-codex-app-server--fetch-models (client on-success)
-  "Refresh model metadata for CLIENT, then call ON-SUCCESS."
+(cl-defun agent-shell-codex-app-server--fetch-models-page (&key client
+                                                                cursor
+                                                                collected
+                                                                on-success)
+  "Fetch one `model/list' page for CLIENT and continue until exhausted."
   (agent-shell-codex-app-server--send-rpc-request
    :client client
    :method "model/list"
-   :params (agent-shell-codex-app-server--json-empty-object)
+   :params (if cursor
+               `((cursor . ,cursor))
+             (agent-shell-codex-app-server--json-empty-object))
    :on-success (lambda (result)
-                 (map-put! client :available-models (or (map-elt result 'data) '()))
-                 (when on-success
-                   (funcall on-success)))
+                 (let* ((page (append (or (map-elt result 'data) '()) nil))
+                        (all-models (append collected page))
+                        (next-cursor (map-elt result 'nextCursor)))
+                   (if next-cursor
+                       (agent-shell-codex-app-server--fetch-models-page
+                        :client client
+                        :cursor next-cursor
+                        :collected all-models
+                        :on-success on-success)
+                     (map-put! client :available-models all-models)
+                     (when on-success
+                       (funcall on-success)))))
    :on-failure (lambda (_error _raw)
-                 (map-put! client :available-models '())
+                 (map-put! client :available-models (or collected '()))
                  (when on-success
                    (funcall on-success)))))
+
+(defun agent-shell-codex-app-server--fetch-models (client on-success)
+  "Refresh model metadata for CLIENT, then call ON-SUCCESS."
+  (agent-shell-codex-app-server--fetch-models-page
+   :client client
+   :collected nil
+   :on-success on-success))
 
 (defun agent-shell-codex-app-server--thread-params (client cwd)
   "Return common thread parameters for CLIENT using CWD."
@@ -1298,7 +1545,7 @@ Return an alist containing `:options' and `:payloads'."
     (experimentalRawEvents . ,(agent-shell-codex-app-server--json-bool nil))
     (persistExtendedHistory . ,(agent-shell-codex-app-server--json-bool
                                 (map-elt client :persist-extended-history)))
-    ,@(when-let ((model-id (map-elt client :current-model-id)))
+    ,@(when-let* ((model-id (map-elt client :current-model-id)))
         (list (cons 'model model-id)))))
 
 (cl-defun agent-shell-codex-app-server--list-threads-page (&key client
@@ -1355,9 +1602,9 @@ Return an alist containing `:options' and `:payloads'."
         :client client
         :method "initialize"
         :buffer buffer
-        :params `((clientInfo . ((name . "agent-shell")
+        :params `((clientInfo . ((name . ,agent-shell-codex-app-server--client-name)
                                  (title . "Emacs Agent Shell")
-                                 (version . ,agent-shell--version)))
+                                 (version . ,(bound-and-true-p agent-shell--version))))
                   (capabilities . ((experimentalApi . t))))
         :on-success (lambda (_result)
                       (agent-shell-codex-app-server--send-rpc-notification
@@ -1422,19 +1669,57 @@ Return an alist containing `:options' and `:payloads'."
                                      client result))))
            :on-failure on-failure))))
       ("session/set_model"
-       (map-put! client :current-model-id (map-elt params 'modelId))
-       (when on-success
-         (funcall on-success
-                  `((modelId . ,(map-elt params 'modelId))))))
+       (let* ((model-id (map-elt params 'modelId))
+              (previous-effort (map-elt client :reasoning-effort))
+              (resolved-effort
+               (agent-shell-codex-app-server--resolve-reasoning-effort
+                client model-id previous-effort)))
+         (map-put! client :current-model-id model-id)
+         (map-put! client :reasoning-effort resolved-effort)
+         (when on-success
+           (funcall on-success `((modelId . ,model-id))))
+         (unless (equal resolved-effort previous-effort)
+           (agent-shell-codex-app-server--dispatch-current-mode-update
+            client
+            resolved-effort))))
       ("session/set_mode"
-       (if on-failure
-           (funcall on-failure
-                    (agent-shell-codex-app-server--make-error
-                     "Codex app-server does not expose session modes")
-                    nil)
-         (agent-shell-codex-app-server--call-error-handlers
-          client
-          "Codex app-server does not expose session modes")))
+       (let* ((mode-id (map-elt params 'modeId))
+              (effort (agent-shell-codex-app-server--mode-id-to-reasoning-effort
+                       mode-id))
+              (model-id (map-elt client :current-model-id)))
+         (cond
+          ((not effort)
+           (let ((message
+                  (format "Unsupported Codex app-server session mode: %s"
+                          mode-id)))
+             (if on-failure
+                 (funcall on-failure
+                          (agent-shell-codex-app-server--make-error message)
+                          nil)
+               (agent-shell-codex-app-server--call-error-handlers
+                client
+                message))))
+          ((not (agent-shell-codex-app-server--reasoning-effort-supported-p
+                 client effort model-id))
+           (let ((message
+                  (format "Reasoning effort %s is not supported by %s"
+                          effort
+                          (or (map-elt (agent-shell-codex-app-server--find-model
+                                        client model-id)
+                                       'displayName)
+                              model-id
+                              "the current model"))))
+             (if on-failure
+                 (funcall on-failure
+                          (agent-shell-codex-app-server--make-error message)
+                          nil)
+               (agent-shell-codex-app-server--call-error-handlers
+                client
+                message))))
+          (t
+           (map-put! client :reasoning-effort effort)
+           (when on-success
+             (funcall on-success `((modeId . ,mode-id))))))))
       ("session/prompt"
        (if (map-elt client :pending-prompt)
            (if on-failure
@@ -1453,9 +1738,9 @@ Return an alist containing `:options' and `:payloads'."
                                      (map-elt params 'sessionId)))
                     (input . ,(agent-shell-codex-app-server--translate-prompt-blocks
                                (map-elt params 'prompt)))
-                    ,@(when-let ((model-id (map-elt client :current-model-id)))
+                    ,@(when-let* ((model-id (map-elt client :current-model-id)))
                         (list (cons 'model model-id)))
-                    ,@(when-let ((effort (map-elt client :reasoning-effort)))
+                    ,@(when-let* ((effort (map-elt client :reasoning-effort)))
                         (list (cons 'effort effort))))
           :on-success (lambda (result)
                         (map-put! client :active-turn-id
@@ -1479,11 +1764,11 @@ Return an alist containing `:options' and `:payloads'."
 (defun agent-shell-codex-app-server--grant-permissions (permissions)
   "Convert requested PERMISSIONS to a granted permission payload."
   (delq nil
-        (list (when-let ((network (map-elt permissions 'network)))
+        (list (when-let* ((network (map-elt permissions 'network)))
                 (cons 'network network))
-              (when-let ((file-system (map-elt permissions 'fileSystem)))
+              (when-let* ((file-system (map-elt permissions 'fileSystem)))
                 (cons 'fileSystem file-system))
-              (when-let ((macos (map-elt permissions 'macos)))
+              (when-let* ((macos (map-elt permissions 'macos)))
                 (cons 'macos macos)))))
 
 (defun agent-shell-codex-app-server--default-permission-response (method
@@ -1535,7 +1820,9 @@ Return an alist containing `:options' and `:payloads'."
   "Respond to a pending app-server permission request."
   (let ((request (gethash request-id (map-elt client :pending-permissions))))
     (unless request
-      (error "Unknown pending permission request: %s" request-id))
+      (unless cancelled
+        (error "Unknown pending permission request: %s" request-id))
+      (cl-return-from agent-shell-codex-app-server-send-permission-response nil))
     (remhash request-id (map-elt client :pending-permissions))
     (let* ((original-request (or (map-elt request :request) request))
            (payloads (map-elt request :payloads))
@@ -1582,7 +1869,7 @@ Return an alist containing `:options' and `:payloads'."
     (map-put! client :pending-prompt nil)
     (map-put! client :active-turn-id nil)
     (when pending
-      (when-let ((on-success (map-elt pending :on-success)))
+      (when-let* ((on-success (map-elt pending :on-success)))
         (agent-shell-codex-app-server--call-with-buffer
          client
          (map-elt pending :buffer)
@@ -1598,10 +1885,12 @@ Return an alist containing `:options' and `:payloads'."
     (map-put! client :shutting-down t)
     (map-put! client :pending-prompt nil)
     (map-put! client :active-turn-id nil)
+    (agent-shell-codex-app-server--cancel-tool-output-flush client)
+    (clrhash (map-elt client :pending-tool-output-items))
     (agent-shell-codex-app-server--reject-pending-requests
      client
      "Codex app-server shut down")
-    (when-let ((process (map-elt client :process)))
+    (when-let* ((process (map-elt client :process)))
       (when (process-live-p process)
         (delete-process process))
       (map-put! client :process nil))))
