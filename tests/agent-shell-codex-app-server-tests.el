@@ -21,6 +21,30 @@
       (should (equal (map-elt (plist-get called :request) :method)
                      "authenticate")))))
 
+(ert-deftest agent-shell-codex-app-server-initialize-uses-distinct-client-name ()
+  "Initialize should report Agent Shell's distinct client name to Codex."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        request-args
+        notification-args)
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+               (lambda (&rest args)
+                 (setq request-args args)
+                 (when-let* ((on-success (plist-get args :on-success)))
+                   (funcall on-success '()))))
+              ((symbol-function 'agent-shell-codex-app-server--send-rpc-notification)
+               (lambda (&rest args)
+                 (setq notification-args args))))
+      (agent-shell-codex-app-server-send-request
+       :client client
+       :request '((:method . "initialize")))
+      (should (equal (map-nested-elt (plist-get request-args :params)
+                                     '(clientInfo name))
+                     agent-shell-codex-app-server--client-name))
+      (should (equal (map-nested-elt (plist-get request-args :params)
+                                     '(clientInfo title))
+                     "Emacs Agent Shell"))
+      (should (equal (map-elt notification-args :method) "initialized")))))
+
 (ert-deftest agent-shell-codex-app-server-defers-notification-callbacks ()
   "Translated notifications should be delivered off the process filter stack."
   (let* ((target-buffer (generate-new-buffer " *agent-shell-codex-app-server-test*"))
@@ -114,6 +138,23 @@
       (should-not (map-elt client :message-queue))
       (should-not errors))))
 
+(ert-deftest agent-shell-codex-app-server-structured-errors-use-inner-message ()
+  "Structured error payloads should surface a human-readable message."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        delivered)
+    (agent-shell-codex-app-server-subscribe-to-errors
+     :client client
+     :on-error (lambda (error)
+                 (setq delivered error)))
+    (agent-shell-codex-app-server--handle-notification
+     client
+     '((method . "error")
+       (params . ((message . ((message . "You've hit your usage limit.")
+                              (codexErrorInfo . "usageLimitExceeded")
+                              (additionalDetails)))))))
+    (should (equal (map-elt delivered 'message)
+                   "You've hit your usage limit."))))
+
 (ert-deftest agent-shell-codex-app-server-save-tool-entry-adds-status ()
   "New tool entries should accept status updates without `map-not-inplace'."
   (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
@@ -143,15 +184,122 @@
                    "/tmp"))))
 
 (ert-deftest agent-shell-codex-app-server-read-commands-use-read-kind ()
-  "Read-only shell commands should render as `read' instead of `execute'."
+  "Read-only command actions should render as `read' instead of `execute'."
   (let* ((item '((id . "tool-1")
                  (type . "commandExecution")
                  (command . "/bin/zsh -lc \"sed -n '1,220p' foo.txt\"")
+                 (commandActions . (((type . "read"))))
                  (cwd . "/tmp")))
          (entry (agent-shell-codex-app-server--tool-entry-from-item item)))
     (should (equal (map-elt entry :kind) "read"))
     (should (equal (map-elt entry :description)
                    "/bin/zsh -lc \"sed -n '1,220p' foo.txt\""))))
+
+(ert-deftest agent-shell-codex-app-server-mixed-command-actions-use-execute-kind ()
+  "Mixed or unknown command actions should stay `execute'."
+  (let* ((item '((id . "tool-1")
+                 (type . "commandExecution")
+                 (command . "/bin/zsh -lc \"cat foo.txt && npm test\"")
+                 (commandActions . (((type . "read"))
+                                    ((type . "unknown"))))
+                 (cwd . "/tmp")))
+         (entry (agent-shell-codex-app-server--tool-entry-from-item item)))
+    (should (equal (map-elt entry :kind) "execute"))))
+
+(ert-deftest agent-shell-codex-app-server-read-command-approvals-use-read-kind ()
+  "Read-only command approvals should render as `read'."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         (translated
+          (agent-shell-codex-app-server--translate-request
+           client
+           '((method . "item/commandExecution/requestApproval")
+             (id . 31)
+             (params . ((itemId . "call-1")
+                        (command . "/bin/zsh -lc \"sed -n '1,220p' foo.txt\"")
+                        (commandActions . (((type . "read"))))
+                        (cwd . "/tmp")))))))
+    (should (equal (map-nested-elt translated '(params toolCall kind))
+                   "read"))))
+
+(ert-deftest agent-shell-codex-app-server-coalesces-command-output-deltas ()
+  "Command output deltas should be coalesced before notifying the UI."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         (item '((id . "tool-1")
+                 (type . "commandExecution")
+                 (command . "rg foo")
+                 (cwd . "/tmp")))
+         notifications
+         timers)
+    (agent-shell-codex-app-server--save-tool-entry client item "inProgress")
+    (acp-subscribe-to-notifications
+     :client client
+     :on-notification (lambda (notification)
+                        (push notification notifications)))
+    (let ((agent-shell-codex-app-server--output-flush-interval 0.05))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (&rest args)
+                   (push args timers)
+                   'fake-tool-output-timer)))
+        (should-not
+         (agent-shell-codex-app-server--translate-command-output
+          client '((itemId . "tool-1")
+                   (delta . "alpha"))))
+        (should-not
+         (agent-shell-codex-app-server--translate-command-output
+          client '((itemId . "tool-1")
+                   (delta . "beta"))))
+        (should-not notifications)
+        (should (= (length timers) 1))
+        (agent-shell-codex-app-server--flush-tool-output-updates client)))
+    (should (equal (map-nested-elt (car (map-nested-elt (car notifications)
+                                                         '(params update content)))
+                                   '(content text))
+                   "alphabeta"))
+    (should (zerop (hash-table-count (map-elt client :pending-tool-output-items))))
+    (should-not (map-elt client :tool-output-flush-timer))))
+
+(ert-deftest agent-shell-codex-app-server-completed-items-flush-buffered-output ()
+  "Completed items should render buffered output even before debounce fires."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         (item '((id . "tool-1")
+                 (type . "commandExecution")
+                 (command . "rg foo")
+                 (cwd . "/tmp")))
+         (completed '((method . "item/completed")
+                      (params . ((item . ((id . "tool-1")
+                                          (type . "commandExecution")
+                                          (command . "rg foo")
+                                          (cwd . "/tmp")
+                                          (status . "completed")))))))
+         notifications
+         cancelled-timer)
+    (agent-shell-codex-app-server--save-tool-entry client item "inProgress")
+    (acp-subscribe-to-notifications
+     :client client
+     :on-notification (lambda (notification)
+                        (push notification notifications)))
+    (let ((agent-shell-codex-app-server--output-flush-interval 0.05))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (&rest _args)
+                   'fake-tool-output-timer))
+                ((symbol-function 'cancel-timer)
+                 (lambda (timer)
+                   (setq cancelled-timer timer))))
+        (agent-shell-codex-app-server--translate-command-output
+         client '((itemId . "tool-1")
+                  (delta . "alphabeta")))
+        (agent-shell-codex-app-server--handle-notification client completed)))
+    (should (equal cancelled-timer 'fake-tool-output-timer))
+    (should (equal (map-nested-elt (car (map-nested-elt (car notifications)
+                                                         '(params update content)))
+                                   '(content text))
+                   "alphabeta"))
+    (should (equal (map-nested-elt (car notifications) '(params update status))
+                   "completed"))
+    (should (equal (gethash "tool-1" (map-elt client :tool-outputs))
+                   "alphabeta"))
+    (should-not (gethash "tool-1" (map-elt client :tool-output-chunks)))
+    (should (zerop (hash-table-count (map-elt client :pending-tool-output-items))))))
 
 (ert-deftest agent-shell-codex-app-server-mcp-tools-render-result-and-description ()
   "MCP tool calls should expose a description and render text results."
@@ -298,6 +446,48 @@
     (should (equal (mapcar (lambda (option) (map-elt option 'name)) options)
                    '("Reject" "Cancel")))))
 
+(ert-deftest agent-shell-codex-app-server-file-change-cancel-uses-interrupt-path ()
+  "File change approvals should rely on interrupt for cancel semantics."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         (translated
+          (agent-shell-codex-app-server--translate-request
+           client
+           '((method . "item/fileChange/requestApproval")
+             (id . 73)
+             (params . ((itemId . "call-1")
+                        (reason . "Apply patch")
+                        (grantRoot . "/tmp"))))))
+         (options (map-nested-elt translated '(params options)))
+         captured-result)
+    (should (equal (mapcar (lambda (option) (map-elt option 'name)) options)
+                   '("Allow" "Always Allow" "Reject")))
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-response)
+               (lambda (&rest args)
+                 (setq captured-result (plist-get args :result)))))
+      (agent-shell-codex-app-server-send-permission-response
+       :client client
+       :request-id 73
+       :cancelled t))
+    (should (equal captured-result '((decision . "cancel"))))))
+
+(ert-deftest agent-shell-codex-app-server-cancelled-missing-permission-is-ignored ()
+  "Cancelling an already-cleared permission request should be a no-op."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        rpc-sent)
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-response)
+               (lambda (&rest _args)
+                 (setq rpc-sent t))))
+      (should-not
+       (condition-case nil
+           (progn
+             (agent-shell-codex-app-server-send-permission-response
+              :client client
+              :request-id 12
+              :cancelled t)
+             nil)
+         (error t))))
+    (should-not rpc-sent)))
+
 (ert-deftest agent-shell-codex-app-server-wraps-pty-processes-in-raw-shell ()
   "PTY clients should disable terminal echo/canonical mode before exec."
   (let* ((client (agent-shell-codex-app-server-make-client
@@ -355,6 +545,208 @@
     (should (equal (mapcar (lambda (session) (map-elt session 'sessionId))
                            (map-elt response 'sessions))
                    '("thr-1" "thr-2")))))
+
+(ert-deftest agent-shell-codex-app-server-model-list-fetches-all-pages ()
+  "Model listing should follow nextCursor until all pages are loaded."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         requests
+         completed)
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+               (lambda (&rest args)
+                 (push (plist-get args :params) requests)
+                 (funcall
+                  (plist-get args :on-success)
+                  (if (map-elt (plist-get args :params) 'cursor)
+                      '((data . (((id . "model-2")
+                                  (model . "gpt-5.2")
+                                  (displayName . "GPT-5.2")
+                                  (description . "Second page")
+                                  (isDefault . nil))))
+                        (nextCursor . nil))
+                    '((data . (((id . "model-1")
+                                (model . "gpt-5.1")
+                                (displayName . "GPT-5.1")
+                                (description . "First page")
+                                (isDefault . t))))
+                      (nextCursor . "page-2")))))))
+      (agent-shell-codex-app-server--fetch-models
+       client
+       (lambda ()
+         (setq completed t))))
+    (should completed)
+    (should (= (length requests) 2))
+    (should-not (map-elt (cadr requests) 'cursor))
+    (should (equal (map-elt (car requests) 'cursor) "page-2"))
+    (should (equal (mapcar (lambda (model) (map-elt model 'model))
+                           (map-elt client :available-models))
+                   '("gpt-5.1" "gpt-5.2")))))
+
+(ert-deftest agent-shell-codex-app-server-session-response-includes-reasoning-modes ()
+  "Session responses should expose synthetic reasoning-effort modes."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh")))
+    (map-put! client :available-models
+              '(((id . "model-1")
+                 (model . "gpt-5.4")
+                 (displayName . "GPT-5.4")
+                 (description . "Main model")
+                 (supportedReasoningEfforts . (((reasoningEffort . "low")
+                                                (description . "Faster"))
+                                               ((reasoningEffort . "medium")
+                                                (description . "Balanced"))
+                                               ((reasoningEffort . "xhigh")
+                                                (description . "Deepest"))))
+                 (defaultReasoningEffort . "medium")
+                 (isDefault . t))))
+    (let ((response
+           (agent-shell-codex-app-server--session-response
+            client
+            '((thread . ((id . "thread-1")))
+              (model . "gpt-5.4")
+              (reasoningEffort . "xhigh")))))
+      (should (equal (map-nested-elt response '(modes currentModeId))
+                     "reasoning:xhigh"))
+      (should (equal (mapcar (lambda (mode) (map-elt mode 'id))
+                             (map-nested-elt response '(modes availableModes)))
+                     '("reasoning:low" "reasoning:medium" "reasoning:xhigh")))
+      (should (equal (mapcar (lambda (mode) (map-elt mode 'name))
+                             (map-nested-elt response '(modes availableModes)))
+                     '("Low" "Medium" "XHigh"))))))
+
+(ert-deftest agent-shell-codex-app-server-session-set-mode-updates-reasoning-effort ()
+  "Session mode changes should update the local reasoning effort."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         response)
+    (map-put! client :available-models
+              '(((id . "model-1")
+                 (model . "gpt-5.4")
+                 (displayName . "GPT-5.4")
+                 (supportedReasoningEfforts . (((reasoningEffort . "low")
+                                                (description . "Faster"))
+                                               ((reasoningEffort . "medium")
+                                                (description . "Balanced"))
+                                               ((reasoningEffort . "high")
+                                                (description . "Deeper"))))
+                 (defaultReasoningEffort . "medium")
+                 (isDefault . t))))
+    (map-put! client :current-model-id "gpt-5.4")
+    (agent-shell-codex-app-server-send-request
+     :client client
+     :request '((:method . "session/set_mode")
+                (:params . ((modeId . "reasoning:high"))))
+     :on-success (lambda (result)
+                   (setq response result)))
+    (should (equal (map-elt client :reasoning-effort) "high"))
+    (should (equal (map-elt response 'modeId) "reasoning:high"))))
+
+(ert-deftest agent-shell-codex-app-server-session-set-mode-rejects-unsupported-effort ()
+  "Session mode changes should fail when the current model does not support the effort."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         delivered-error)
+    (map-put! client :available-models
+              '(((id . "model-1")
+                 (model . "gpt-5.4-mini")
+                 (displayName . "GPT-5.4 Mini")
+                 (supportedReasoningEfforts . (((reasoningEffort . "low")
+                                                (description . "Faster"))
+                                               ((reasoningEffort . "medium")
+                                                (description . "Balanced"))))
+                 (defaultReasoningEffort . "low")
+                 (isDefault . t))))
+    (map-put! client :current-model-id "gpt-5.4-mini")
+    (agent-shell-codex-app-server-send-request
+     :client client
+     :request '((:method . "session/set_mode")
+                (:params . ((modeId . "reasoning:xhigh"))))
+     :on-failure (lambda (error _raw)
+                   (setq delivered-error error)))
+    (should (string-match-p "not supported"
+                            (map-elt delivered-error 'message)))
+    (should-not (equal (map-elt client :reasoning-effort) "xhigh"))))
+
+(ert-deftest agent-shell-codex-app-server-session-set-model-adjusts-invalid-effort ()
+  "Model changes should fall back to a supported reasoning effort."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         notifications
+         response)
+    (map-put! client :available-models
+              '(((id . "model-1")
+                 (model . "gpt-5.4")
+                 (displayName . "GPT-5.4")
+                 (supportedReasoningEfforts . (((reasoningEffort . "medium")
+                                                (description . "Balanced"))
+                                               ((reasoningEffort . "high")
+                                                (description . "Deeper"))))
+                 (defaultReasoningEffort . "medium")
+                 (isDefault . t))
+                ((id . "model-2")
+                 (model . "gpt-5.4-mini")
+                 (displayName . "GPT-5.4 Mini")
+                 (supportedReasoningEfforts . (((reasoningEffort . "low")
+                                                (description . "Faster"))
+                                               ((reasoningEffort . "medium")
+                                                (description . "Balanced"))))
+                 (defaultReasoningEffort . "low")
+                 (isDefault . nil))))
+    (map-put! client :current-model-id "gpt-5.4")
+    (map-put! client :reasoning-effort "high")
+    (agent-shell-codex-app-server-subscribe-to-notifications
+     :client client
+     :on-notification (lambda (notification)
+                        (push notification notifications)))
+    (agent-shell-codex-app-server-send-request
+     :client client
+     :request '((:method . "session/set_model")
+                (:params . ((modelId . "gpt-5.4-mini"))))
+     :on-success (lambda (result)
+                   (setq response result)))
+    (should (equal (map-elt response 'modelId) "gpt-5.4-mini"))
+    (should (equal (map-elt client :reasoning-effort) "low"))
+    (should (equal (map-nested-elt (car notifications)
+                                   '(params update currentModeId))
+                   "reasoning:low"))))
+
+(ert-deftest agent-shell-codex-app-server-rejects-unsupported-server-requests ()
+  "Unsupported server requests should receive a JSON-RPC error."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         dispatched
+         error-message
+         rejected-id
+         rejected-code
+         rejected-message
+         (request
+          (list (cons 'method "item/tool/requestUserInput")
+                (cons 'id 91)
+                (cons 'params
+                      (list (cons 'threadId "thr-1")
+                            (cons 'turnId "turn-1")
+                            (cons 'itemId "call-1")
+                            (cons 'questions
+                                  (list (list (cons 'id "name")
+                                              (cons 'question "Name?")
+                                              (cons 'header "Name")
+                                              (cons 'options '())))))))))
+    (agent-shell-codex-app-server-subscribe-to-requests
+     :client client
+     :on-request (lambda (_request)
+                   (setq dispatched t)))
+    (agent-shell-codex-app-server-subscribe-to-errors
+     :client client
+     :on-error (lambda (error)
+                 (setq error-message (map-elt error 'message))))
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-error)
+               (lambda (&rest args)
+                 (setq rejected-id (plist-get args :request-id)
+                       rejected-code (plist-get args :code)
+                       rejected-message (plist-get args :message)))))
+      (agent-shell-codex-app-server--route-message
+       client
+       request))
+    (should-not dispatched)
+    (should (equal rejected-id 91))
+    (should (= rejected-code -32601))
+    (should (equal rejected-message
+                   "Unsupported Codex app-server request: item/tool/requestUserInput"))
+    (should (equal error-message rejected-message))))
 
 (ert-deftest agent-shell-codex-app-server-ignores-stale-turn-completion ()
   "A late completion for an older turn should not resolve the current prompt."
