@@ -1924,5 +1924,63 @@ code block content
         (should-not responded)
         (should (equal (map-elt state :last-entry-type) "session/request_permission"))))))
 
+;;; Tests for agent-shell-show-context-usage-indicator
+
+(ert-deftest agent-shell--context-usage-indicator-bar-test ()
+  "Test `agent-shell--context-usage-indicator' bar mode."
+  (let ((agent-shell--state
+         (list (cons :buffer (current-buffer))
+               (cons :usage (list (cons :context-used 50000)
+                                  (cons :context-size 200000)
+                                  (cons :total-tokens 50000))))))
+    (cl-letf (((symbol-function 'agent-shell--state)
+               (lambda () agent-shell--state)))
+      (let ((agent-shell-show-context-usage-indicator t))
+        (let ((result (agent-shell--context-usage-indicator)))
+          (should result)
+          (should (= (length (substring-no-properties result)) 1))
+          (should (eq (get-text-property 0 'face result) 'success)))))))
+
+(ert-deftest agent-shell--context-usage-indicator-detailed-test ()
+  "Test `agent-shell--context-usage-indicator' detailed mode."
+  (let ((agent-shell--state
+         (list (cons :buffer (current-buffer))
+               (cons :usage (list (cons :context-used 30000)
+                                  (cons :context-size 200000)
+                                  (cons :total-tokens 30000))))))
+    (cl-letf (((symbol-function 'agent-shell--state)
+               (lambda () agent-shell--state)))
+      (let ((agent-shell-show-context-usage-indicator 'detailed))
+        (let ((result (agent-shell--context-usage-indicator)))
+          (should result)
+          (should (string-match-p "30k/200k" (substring-no-properties result)))
+          (should (string-match-p "15%%" (substring-no-properties result)))
+          (should (eq (get-text-property 0 'face result) 'success)))))))
+
+(ert-deftest agent-shell--context-usage-indicator-detailed-warning-test ()
+  "Test `agent-shell--context-usage-indicator' detailed mode with warning face."
+  (let ((agent-shell--state
+         (list (cons :buffer (current-buffer))
+               (cons :usage (list (cons :context-used 140000)
+                                  (cons :context-size 200000)
+                                  (cons :total-tokens 140000))))))
+    (cl-letf (((symbol-function 'agent-shell--state)
+               (lambda () agent-shell--state)))
+      (let ((agent-shell-show-context-usage-indicator 'detailed))
+        (let ((result (agent-shell--context-usage-indicator)))
+          (should (eq (get-text-property 0 'face result) 'warning)))))))
+
+(ert-deftest agent-shell--context-usage-indicator-nil-test ()
+  "Test `agent-shell--context-usage-indicator' returns nil when disabled."
+  (let ((agent-shell--state
+         (list (cons :buffer (current-buffer))
+               (cons :usage (list (cons :context-used 50000)
+                                  (cons :context-size 200000)
+                                  (cons :total-tokens 50000))))))
+    (cl-letf (((symbol-function 'agent-shell--state)
+               (lambda () agent-shell--state)))
+      (let ((agent-shell-show-context-usage-indicator nil))
+        (should-not (agent-shell--context-usage-indicator))))))
+
 (provide 'agent-shell-tests)
 ;;; agent-shell-tests.el ends here

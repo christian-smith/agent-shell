@@ -2954,7 +2954,8 @@ BINDINGS is a list of alists defining key bindings to display, each with:
                                   (concat " ➤ " (map-elt header-model :session-id))
                                 "")
                               (if (map-elt header-model :context-indicator)
-                                  (concat " " (map-elt header-model :context-indicator))
+                                  (concat (if (> (length (map-elt header-model :context-indicator)) 1) " ➤ " " ")
+                                          (map-elt header-model :context-indicator))
                                 "")
                               (if (map-elt header-model :busy-indicator-frame)
                                   (map-elt header-model :busy-indicator-frame)
@@ -3046,17 +3047,22 @@ BINDINGS is a list of alists defining key bindings to display, each with:
                                                                       (dx . "8"))
                                                                     (map-elt header-model :mode-name))))
                                       (when (map-elt header-model :context-indicator)
-                                        (let* (;; Extract the face from the propertized string
-                                               (face (get-text-property 0 'face (map-elt header-model :context-indicator)))
-                                               ;; Get the foreground color from the face
-                                               (color (if face
-                                                          (face-attribute face :foreground nil t)
-                                                        (face-attribute 'default :foreground))))
+                                        (when (> (length (map-elt header-model :context-indicator)) 1)
+                                          ;; Add separator arrow
                                           (dom-append-child text-node
                                                             (dom-node 'tspan
-                                                                      `((fill . ,color)
+                                                                      `((fill . ,(face-attribute 'default :foreground))
                                                                         (dx . "8"))
-                                                                      (substring-no-properties (map-elt header-model :context-indicator))))))
+                                                                      "➤")))
+                                        ;; Add context indicator
+                                        (dom-append-child text-node
+                                                          (dom-node 'tspan
+                                                                    `((fill . ,(face-attribute
+                                                                                (or (get-text-property 0 'face (map-elt header-model :context-indicator))
+                                                                                    'default)
+                                                                                :foreground nil t))
+                                                                      (dx . "8"))
+                                                                    (format-mode-line (map-elt header-model :context-indicator)))))
                                       (when (map-elt header-model :busy-indicator-frame)
                                         (dom-append-child text-node
                                                           (dom-node 'tspan
