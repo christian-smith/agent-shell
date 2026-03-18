@@ -5518,8 +5518,9 @@ Returns an alist with insertion details or nil otherwise:
    (:end . END))
 
 Uses optional SHELL-BUFFER to make paths relative to shell project."
-  (if (or agent-shell-prefer-viewport-interaction
-          (derived-mode-p 'agent-shell-viewport-edit-mode))
+  (if (and (not (derived-mode-p 'agent-shell-mode))
+           (or agent-shell-prefer-viewport-interaction
+               (derived-mode-p 'agent-shell-viewport-edit-mode)))
       (agent-shell-viewport--show-buffer :append text :submit submit
                                          :no-focus no-focus :shell-buffer shell-buffer)
     (agent-shell--insert-to-shell-buffer :text text :submit submit
