@@ -5023,6 +5023,55 @@ for details."
 
 ;;; Permissions
 
+(cl-defun agent-shell--permission-title (&key acp-request)
+  "Build a display title for a permission request from ACP-REQUEST.
+
+Extracts the tool call title, command, and filepath from ACP-REQUEST
+and combines them into a user-facing string.
+
+For example:
+
+  ACP-REQUEST with title \"edit\" and filepath \"/home/user/foo.rs\"
+  => \"edit (foo.rs)\"
+
+  ACP-REQUEST with title \"Bash\" and command \"ls -la\"
+  => \"```console\\nls -la\\n```\""
+  (let* ((title (map-nested-elt acp-request '(params toolCall title)))
+         (command (agent-shell--tool-call-command-to-string
+                   (map-nested-elt acp-request '(params toolCall rawInput command))))
+         (filepath (or (map-nested-elt acp-request '(params toolCall rawInput filepath))
+                       (map-nested-elt acp-request '(params toolCall rawInput fileName))
+                       (map-nested-elt acp-request '(params toolCall rawInput path))
+                       (map-nested-elt acp-request '(params toolCall rawInput file_path))))
+         ;; Some agents don't include the command in the
+         ;; permission/tool call title, so it's hard to know
+         ;; what the permission is actually allowing.
+         ;; Display command if needed.
+         (text (if (and (stringp title)
+                        (stringp command)
+                        (not (string-empty-p command))
+                        (string-match-p (regexp-quote command) title))
+                   title
+                 (or command title))))
+    ;; Append filename to title when available and not
+    ;; already included, so the user can see which file
+    ;; the permission applies to.
+    (when-let ((filename (and filepath
+                              (file-name-nondirectory filepath)))
+               ((not (string-empty-p filename)))
+               ((or (not text)
+                    (not (string-match-p (regexp-quote filename) text)))))
+      (setq text (if text
+                     (concat (string-trim-right text) " (" filename ")")
+                   filename)))
+    ;; Fence execute commands so markdown-overlays
+    ;; renders them verbatim, not as markdown.
+    (if (and text
+             (equal text command)
+             (equal (map-nested-elt acp-request '(params toolCall kind)) "execute"))
+        (concat "```console\n" text "\n```")
+      text)))
+
 (cl-defun agent-shell--make-tool-call-permission-text (&key acp-request client state)
   "Create text to render permission dialog using ACP-REQUEST, CLIENT, and STATE.
 
@@ -5078,26 +5127,7 @@ For example:
                                  (with-current-buffer shell-buffer
                                    (agent-shell-interrupt t))))
                    map))
-         (title (let* ((title (map-nested-elt acp-request '(params toolCall title)))
-                       (command (agent-shell--tool-call-command-to-string
-                                 (map-nested-elt acp-request '(params toolCall rawInput command))))
-                       ;; Some agents don't include the command in the
-                       ;; permission/tool call title, so it's hard to know
-                       ;; what the permission is actually allowing.
-                       ;; Display command if needed.
-                       (text (if (and (stringp title)
-                                      (stringp command)
-                                      (not (string-empty-p command))
-                                      (string-match-p (regexp-quote command) title))
-                                 title
-                               (or command title))))
-                  ;; Fence execute commands so markdown-overlays
-                  ;; renders them verbatim, not as markdown.
-                  (if (and text
-                           (equal text command)
-                           (equal (map-nested-elt acp-request '(params toolCall kind)) "execute"))
-                      (concat "```console\n" text "\n```")
-                    text)))
+         (title (agent-shell--permission-title :acp-request acp-request))
          (diff-button (when diff
                         (agent-shell--make-permission-button
                          :text "View (v)"

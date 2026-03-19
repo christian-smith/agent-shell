@@ -2021,5 +2021,57 @@ code block content
       (let ((agent-shell-show-context-usage-indicator nil))
         (should-not (agent-shell--context-usage-indicator))))))
 
+;;; Tests for agent-shell--permission-title
+
+(ert-deftest agent-shell--permission-title-read-shows-filename-test ()
+  "Test `agent-shell--permission-title' includes filename for read permission.
+Based on ACP traffic from https://github.com/xenodium/agent-shell/issues/415."
+  (should (equal
+           "external_directory (_event.rs)"
+           (agent-shell--permission-title
+            :acp-request
+            '((params . ((toolCall . ((toolCallId . "call_ad19e402fcb548c3acd48bbd")
+                                      (status . "pending")
+                                      (title . "external_directory")
+                                      (rawInput . ((filepath . "/home/pmw/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-s3-1.112.0/src/types/_event.rs")
+                                                   (parentDir . "/home/pmw/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-s3-1.112.0/src/types")))
+                                      (kind . "other"))))))))))
+
+(ert-deftest agent-shell--permission-title-edit-shows-filename-test ()
+  "Test `agent-shell--permission-title' includes filename for edit permission.
+Based on ACP traffic from https://github.com/xenodium/agent-shell/issues/415."
+  (should (equal
+           "edit (s3notifications.rs)"
+           (agent-shell--permission-title
+            :acp-request
+            '((params . ((toolCall . ((toolCallId . "call_451e5acf91884aecaadf3173")
+                                      (status . "pending")
+                                      (title . "edit")
+                                      (rawInput . ((filepath . "/home/pmw/Repos/warmup-s3-archives/src/s3notifications.rs")
+                                                   (diff . "Index: /home/pmw/Repos/warmup-s3-archives/src/s3notifications.rs\n")))
+                                      (kind . "edit"))))))))))
+
+(ert-deftest agent-shell--permission-title-no-duplicate-filename-test ()
+  "Test `agent-shell--permission-title' does not duplicate filename already in title."
+  (should (equal
+           "Read s3notifications.rs"
+           (agent-shell--permission-title
+            :acp-request
+            '((params . ((toolCall . ((toolCallId . "tc-1")
+                                      (title . "Read s3notifications.rs")
+                                      (rawInput . ((filepath . "/home/user/src/s3notifications.rs")))
+                                      (kind . "read"))))))))))
+
+(ert-deftest agent-shell--permission-title-execute-fenced-test ()
+  "Test `agent-shell--permission-title' fences execute commands."
+  (should (equal
+           "```console\nls -la\n```"
+           (agent-shell--permission-title
+            :acp-request
+            '((params . ((toolCall . ((toolCallId . "tc-1")
+                                      (title . "Bash")
+                                      (rawInput . ((command . "ls -la")))
+                                      (kind . "execute"))))))))))
+
 (provide 'agent-shell-tests)
 ;;; agent-shell-tests.el ends here
