@@ -50,6 +50,7 @@ We now have a handful of additional packages to extend the =agent-shell= experie
 - [[https://github.com/ElleNajt/meta-agent-shell][meta-agent-shell]]: Multi-agent coordination system for =agent-shell= with inter-agent communication, task tracking, and project-level dispatching.
 - [[https://github.com/xenodium/agent-shell-knockknock][agent-shell-knockknock]]: Notifications for =agent-shell= via [[https://github.com/konrad1977/knockknock][knockknock.el]].
 - [[https://github.com/xenodium/emacs-skills][emacs-skills]]: Claude Agent skills for Emacs.
+- [[https://github.com/Embedded-Focus/agent-circus][agent-circus]]: Run AI coding agents in sandboxed Docker containers.
 
 * Icons
 
