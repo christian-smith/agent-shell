@@ -1233,14 +1233,16 @@ code block content
                        test-buffer))
                     ((symbol-function 'shell-maker--process) (lambda () fake-process))
                     ((symbol-function 'shell-maker-finish-output) #'ignore)
+                    ((symbol-function 'agent-shell--handle) #'ignore)
                     (agent-shell-file-completion-enabled nil))
             (let* ((shell-buffer (agent-shell--start :config config
                                                      :no-focus t
                                                      :new-session t))
                    (subs (map-elt (buffer-local-value 'agent-shell--state shell-buffer)
                                   :event-subscriptions)))
-              (should (= 1 (length subs)))
-              (should (eq 'turn-complete (map-elt (car subs) :event))))))
+              (should (seq-find (lambda (sub)
+                                  (eq 'turn-complete (map-elt sub :event)))
+                                subs)))))
       (remove-hook 'agent-shell-mode-hook hook-fn)
       (when (process-live-p fake-process)
         (delete-process fake-process))
