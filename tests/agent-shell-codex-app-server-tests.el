@@ -1,5 +1,7 @@
 ;;; agent-shell-codex-app-server-tests.el --- Tests for Codex app-server ACP bridge -*- lexical-binding: t; -*-
 
+;;; Code:
+
 (require 'ert)
 (require 'acp)
 (require 'agent-shell-codex-app-server)
@@ -861,12 +863,12 @@
                (lambda (_client message)
                  (setq calls (1+ calls))
                  (when (equal message 'bad)
-                   (error "boom")))))
+                   (error "Boom")))))
       (map-put! client :message-queue '(bad good))
       (agent-shell-codex-app-server--drain-message-queue client)
       (sleep-for 0.01))
     (should (= calls 2))
-    (should (equal error-message "Failed to handle app-server message: boom"))
+    (should (equal error-message "Failed to handle app-server message: Boom"))
     (should-not (map-elt client :message-queue))
     (should-not (map-elt client :message-queue-busy))))
 

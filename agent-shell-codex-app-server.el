@@ -50,14 +50,11 @@ and compliance logs identify Agent Shell separately.")
 (defvar agent-shell-codex-app-server--output-flush-interval 0.05
   "Seconds to debounce streamed tool output updates.")
 
-(defcustom agent-shell-codex-app-server-connection-type 'pty
+(defvar agent-shell-codex-app-server-connection-type 'pty
   "Connection type used for Codex app-server processes.
 
 Codex app-server currently flushes JSON-RPC responses reliably over
-PTYs, while pipe-based startup can stall during initialization."
-  :type '(choice (const :tag "PTY" pty)
-                 (const :tag "Pipe" pipe))
-  :group 'agent-shell)
+PTYs, while pipe-based startup can stall during initialization.")
 
 (defun agent-shell-codex-app-server--next-instance-count ()
   "Return the next unique client instance id."
@@ -72,7 +69,11 @@ PTYs, while pipe-based startup can stall during initialization."
                                                          sandbox-mode
                                                          persist-extended-history
                                                          connection-type)
-  "Create a Codex app-server client."
+  "Create a Codex app-server client.
+
+Use COMMAND, COMMAND-PARAMS, ENVIRONMENT-VARIABLES, CONTEXT-BUFFER,
+APPROVAL-POLICY, SANDBOX-MODE, PERSIST-EXTENDED-HISTORY, and
+CONNECTION-TYPE."
   (unless command
     (error ":command is required"))
   (unless (executable-find command)
@@ -207,7 +208,7 @@ PTYs, while pipe-based startup can stall during initialization."
   "Return a raw-mode PTY wrapper command for CLIENT.
 
 The wrapper disables canonical mode and terminal echo before `exec'-ing
-the actual Codex command. This avoids long JSON-RPC request lines being
+the actual Codex command.  This avoids long JSON-RPC request lines being
 held up or dropped by the PTY line discipline."
   (when-let* ((shell (agent-shell-codex-app-server--pty-wrapper-shell)))
     (list shell
@@ -491,7 +492,9 @@ held up or dropped by the PTY line discipline."
               (downcase (agent-shell-codex-app-server--reasoning-mode-name effort)))))
 
 (defun agent-shell-codex-app-server--translate-modes (client &optional model-id effort)
-  "Translate CLIENT reasoning settings into ACP-style session modes."
+  "Translate CLIENT reasoning settings into ACP-style session modes.
+
+Use MODEL-ID and EFFORT to resolve the current mode."
   (let* ((current-effort
           (agent-shell-codex-app-server--resolve-reasoning-effort
            client model-id effort))
@@ -543,7 +546,7 @@ held up or dropped by the PTY line discipline."
           models))
 
 (defun agent-shell-codex-app-server--session-response (client result)
-  "Translate RESULT into an ACP-like session response."
+  "Translate RESULT for CLIENT into an ACP-like session response."
   (let* ((thread (map-elt result 'thread))
          (thread-id (map-elt thread 'id))
          (model-id (or (map-elt result 'model)
@@ -758,14 +761,16 @@ held up or dropped by the PTY line discipline."
     entry))
 
 (defun agent-shell-codex-app-server--get-tool-entry (client item-id)
-  "Return stored tool entry for ITEM-ID."
+  "Return the stored tool entry for CLIENT and ITEM-ID."
   (gethash item-id (map-elt client :tool-items)))
 
 (defun agent-shell-codex-app-server--translate-tool-notification (session-update
                                                                   client
                                                                   item
                                                                   status)
-  "Translate ITEM and STATUS into an ACP-like tool notification."
+  "Translate a tool notification for CLIENT.
+
+Use SESSION-UPDATE, ITEM, and STATUS to build the ACP-like payload."
   (let* ((item-id (map-elt item 'id))
          (entry (or (agent-shell-codex-app-server--get-tool-entry client item-id)
                     (agent-shell-codex-app-server--save-tool-entry client item status))))
@@ -785,7 +790,7 @@ held up or dropped by the PTY line discipline."
                             (content . ,(agent-shell-codex-app-server--tool-content client item)))))))))
 
 (defun agent-shell-codex-app-server--translate-command-output (client params)
-  "Translate command output PARAMS to a tool_call_update."
+  "Translate CLIENT command output PARAMS to a tool_call_update."
   (let* ((item-id (map-elt params 'itemId))
          (delta (or (map-elt params 'delta) "")))
     (unless (string-empty-p delta)
@@ -984,7 +989,7 @@ held up or dropped by the PTY line discipline."
           (append prompt-blocks nil)))
 
 (defun agent-shell-codex-app-server--make-option (kind name option-id)
-  "Return an ACP-like permission option."
+  "Return an ACP-like permission option for KIND, NAME, and OPTION-ID."
   `((kind . ,kind)
     (name . ,name)
     (optionId . ,option-id)))
@@ -1051,20 +1056,22 @@ held up or dropped by the PTY line discipline."
 
 (defun agent-shell-codex-app-server--decision-options (decisions)
   "Return ACP-like options and response payloads for DECISIONS."
-  (let (options payloads)
-    (cl-loop for decision in decisions
-             for index from 0
-             do (when-let* ((spec (agent-shell-codex-app-server--decision-option-spec
-                                   decision))
-                            (option-id (format "decision-%s" index)))
-                  (push (agent-shell-codex-app-server--make-option
-                         (map-elt spec :kind)
-                         (map-elt spec :name)
-                         option-id)
-                        options)
-                  (push (cons option-id
-                              `((decision . ,(map-elt spec :payload))))
-                        payloads)))
+  (let ((index 0)
+        options
+        payloads)
+    (dolist (decision decisions)
+      (when-let* ((spec (agent-shell-codex-app-server--decision-option-spec
+                         decision))
+                  (option-id (format "decision-%s" index)))
+        (push (agent-shell-codex-app-server--make-option
+               (map-elt spec :kind)
+               (map-elt spec :name)
+               option-id)
+              options)
+        (push (cons option-id
+                    `((decision . ,(map-elt spec :payload))))
+              payloads))
+      (setq index (1+ index)))
     `((:options . ,(nreverse options))
       (:payloads . ,(nreverse payloads)))))
 
@@ -1472,7 +1479,7 @@ Return an alist containing `:options' and `:payloads'."
        (format "Codex app-server exited: %s" (string-trim event))))))
 
 (cl-defun agent-shell-codex-app-server-subscribe-to-errors (&key client on-error buffer)
-  "Subscribe CLIENT to errors using ON-ERROR."
+  "Subscribe CLIENT to errors using ON-ERROR in BUFFER."
   (unless on-error
     (error ":on-error is required"))
   (push (lambda (error)
@@ -1482,7 +1489,7 @@ Return an alist containing `:options' and `:payloads'."
   on-error)
 
 (cl-defun agent-shell-codex-app-server-subscribe-to-notifications (&key client on-notification buffer)
-  "Subscribe CLIENT to translated notifications using ON-NOTIFICATION."
+  "Subscribe CLIENT to translated notifications using ON-NOTIFICATION in BUFFER."
   (unless on-notification
     (error ":on-notification is required"))
   (push (lambda (notification)
@@ -1492,7 +1499,7 @@ Return an alist containing `:options' and `:payloads'."
   on-notification)
 
 (cl-defun agent-shell-codex-app-server-subscribe-to-requests (&key client on-request buffer)
-  "Subscribe CLIENT to translated requests using ON-REQUEST."
+  "Subscribe CLIENT to translated requests using ON-REQUEST in BUFFER."
   (unless on-request
     (error ":on-request is required"))
   (push (lambda (request)
@@ -1505,7 +1512,9 @@ Return an alist containing `:options' and `:payloads'."
                                                                 cursor
                                                                 collected
                                                                 on-success)
-  "Fetch one `model/list' page for CLIENT and continue until exhausted."
+  "Fetch one `model/list' page for CLIENT.
+
+Reuse CURSOR, COLLECTED, and ON-SUCCESS until all pages are loaded."
   (agent-shell-codex-app-server--send-rpc-request
    :client client
    :method "model/list"
@@ -1555,7 +1564,10 @@ Return an alist containing `:options' and `:payloads'."
                                                                 collected
                                                                 on-success
                                                                 on-failure)
-  "Fetch one `thread/list' page for CLIENT and continue until exhausted."
+  "Fetch one `thread/list' page for CLIENT in CWD.
+
+Use BUFFER, CURSOR, COLLECTED, ON-SUCCESS, and ON-FAILURE until all
+pages are loaded."
   (agent-shell-codex-app-server--send-rpc-request
    :client client
    :method "thread/list"
@@ -1817,25 +1829,26 @@ Return an alist containing `:options' and `:payloads'."
                                                                    request-id
                                                                    option-id
                                                                    cancelled)
-  "Respond to a pending app-server permission request."
+  "Respond to a pending app-server permission request for CLIENT.
+
+Use REQUEST-ID with OPTION-ID or CANCELLED to pick the response."
   (let ((request (gethash request-id (map-elt client :pending-permissions))))
-    (unless request
-      (unless cancelled
-        (error "Unknown pending permission request: %s" request-id))
-      (cl-return-from agent-shell-codex-app-server-send-permission-response nil))
-    (remhash request-id (map-elt client :pending-permissions))
-    (let* ((original-request (or (map-elt request :request) request))
-           (payloads (map-elt request :payloads))
-           (method (map-elt original-request 'method))
-           (params (or (map-elt original-request 'params) '()))
-           (result (or (and option-id
-                            (cdr (assoc option-id payloads)))
-                       (agent-shell-codex-app-server--default-permission-response
-                        method params option-id cancelled))))
-      (agent-shell-codex-app-server--send-rpc-response
-       :client client
-       :request-id request-id
-       :result result))))
+    (if (not request)
+        (unless cancelled
+          (error "Unknown pending permission request: %s" request-id))
+      (remhash request-id (map-elt client :pending-permissions))
+      (let* ((original-request (or (map-elt request :request) request))
+             (payloads (map-elt request :payloads))
+             (method (map-elt original-request 'method))
+             (params (or (map-elt original-request 'params) '()))
+             (result (or (and option-id
+                              (cdr (assoc option-id payloads)))
+                         (agent-shell-codex-app-server--default-permission-response
+                          method params option-id cancelled))))
+        (agent-shell-codex-app-server--send-rpc-response
+         :client client
+         :request-id request-id
+         :result result)))))
 
 (cl-defun agent-shell-codex-app-server-send-response (&key client response)
   "Translate ACP RESPONSE for CLIENT into an app-server response."
@@ -1903,37 +1916,41 @@ Otherwise call ORIGINAL-FN with ARGS."
     (apply original-fn args)))
 
 (defun agent-shell-codex-app-server--around-acp-send-request (original-fn &rest args)
-  "Route `acp-send-request' ARGS for app-server clients."
+  "Route `acp-send-request' ARGS through ORIGINAL-FN for app-server clients."
   (agent-shell-codex-app-server--acp-dispatch
    original-fn #'agent-shell-codex-app-server-send-request args))
 
 (defun agent-shell-codex-app-server--around-acp-send-notification (original-fn &rest args)
-  "Route `acp-send-notification' ARGS for app-server clients."
+  "Route `acp-send-notification' ARGS through ORIGINAL-FN for app-server clients."
   (agent-shell-codex-app-server--acp-dispatch
    original-fn #'agent-shell-codex-app-server-send-notification args))
 
 (defun agent-shell-codex-app-server--around-acp-send-response (original-fn &rest args)
-  "Route `acp-send-response' ARGS for app-server clients."
+  "Route `acp-send-response' ARGS through ORIGINAL-FN for app-server clients."
   (agent-shell-codex-app-server--acp-dispatch
    original-fn #'agent-shell-codex-app-server-send-response args))
 
 (defun agent-shell-codex-app-server--around-acp-subscribe-to-errors (original-fn &rest args)
-  "Route `acp-subscribe-to-errors' ARGS for app-server clients."
+  "Route `acp-subscribe-to-errors' ARGS through ORIGINAL-FN for app-server clients."
   (agent-shell-codex-app-server--acp-dispatch
    original-fn #'agent-shell-codex-app-server-subscribe-to-errors args))
 
 (defun agent-shell-codex-app-server--around-acp-subscribe-to-notifications (original-fn &rest args)
-  "Route `acp-subscribe-to-notifications' ARGS for app-server clients."
+  "Route `acp-subscribe-to-notifications' for app-server clients.
+
+Pass ARGS through ORIGINAL-FN when the client is not app-server-backed."
   (agent-shell-codex-app-server--acp-dispatch
    original-fn #'agent-shell-codex-app-server-subscribe-to-notifications args))
 
 (defun agent-shell-codex-app-server--around-acp-subscribe-to-requests (original-fn &rest args)
-  "Route `acp-subscribe-to-requests' ARGS for app-server clients."
+  "Route `acp-subscribe-to-requests' for app-server clients.
+
+Pass ARGS through ORIGINAL-FN when the client is not app-server-backed."
   (agent-shell-codex-app-server--acp-dispatch
    original-fn #'agent-shell-codex-app-server-subscribe-to-requests args))
 
 (defun agent-shell-codex-app-server--around-acp-shutdown (original-fn &rest args)
-  "Route `acp-shutdown' ARGS for app-server clients."
+  "Route `acp-shutdown' ARGS through ORIGINAL-FN for app-server clients."
   (agent-shell-codex-app-server--acp-dispatch
    original-fn #'agent-shell-codex-app-server-shutdown args))
 
