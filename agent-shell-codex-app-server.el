@@ -1833,9 +1833,7 @@ pages are loaded."
 
 Use REQUEST-ID with OPTION-ID or CANCELLED to pick the response."
   (let ((request (gethash request-id (map-elt client :pending-permissions))))
-    (if (not request)
-        (unless cancelled
-          (error "Unknown pending permission request: %s" request-id))
+    (when request
       (remhash request-id (map-elt client :pending-permissions))
       (let* ((original-request (or (map-elt request :request) request))
              (payloads (map-elt request :payloads))

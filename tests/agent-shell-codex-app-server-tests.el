@@ -490,6 +490,30 @@
          (error t))))
     (should-not rpc-sent)))
 
+(ert-deftest agent-shell-codex-app-server-duplicate-permission-response-is-ignored ()
+  "A duplicate response for a cleared request should be a no-op."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        responses)
+    (agent-shell-codex-app-server--translate-request
+     client
+     '((method . "item/commandExecution/requestApproval")
+       (id . 74)
+       (params . ((itemId . "call-1")
+                  (command . "ls")
+                  (cwd . "/tmp")))))
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-response)
+               (lambda (&rest args)
+                 (push args responses))))
+      (agent-shell-codex-app-server-send-permission-response
+       :client client
+       :request-id 74
+       :option-id "grant")
+      (agent-shell-codex-app-server-send-response
+       :client client
+       :response '((:request-id . 74)
+                   (:result . ((outcome . ((outcome . "cancelled"))))))))
+    (should (= (length responses) 1))))
+
 (ert-deftest agent-shell-codex-app-server-wraps-pty-processes-in-raw-shell ()
   "PTY clients should disable terminal echo/canonical mode before exec."
   (let* ((client (agent-shell-codex-app-server-make-client
