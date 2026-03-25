@@ -91,19 +91,14 @@ The first element is the command name, and the rest are command parameters."
   :type '(repeat string)
   :group 'agent-shell)
 
-(defcustom agent-shell-openai-codex-transport 'acp
-  "Transport used for the OpenAI Codex integration."
-  :type '(choice (const :tag "ACP (codex-acp)" acp)
-                 (const :tag "App server (codex app-server)" app-server))
-  :group 'agent-shell)
+(defvar agent-shell-openai-codex-transport 'acp
+  "Transport used for the OpenAI Codex integration.")
 
-(defcustom agent-shell-openai-codex-app-server-command
+(defvar agent-shell-openai-codex-app-server-command
   '("codex" "app-server")
   "Command and parameters for the OpenAI Codex app-server client.
 
-The first element is the command name, and the rest are command parameters."
-  :type '(repeat string)
-  :group 'agent-shell)
+The first element is the command name, and the rest are command parameters.")
 
 (defcustom agent-shell-openai-codex-environment
   nil
