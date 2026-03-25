@@ -2575,7 +2575,8 @@ PROPERTIES is an optional plist of additional text properties to apply."
                            (when keymap
                              (set-keymap-parent map keymap))
                            map)
-                 'button kind)))
+                 'button kind
+                 'rear-nonsticky t)))
     (if properties
         (apply #'agent-shell--add-text-properties button properties)
       button)))
