@@ -1177,12 +1177,32 @@ Return an alist containing `:options' and `:payloads'."
                                     (status . "in_progress")
                                     (kind . ,(agent-shell-codex-app-server--approval-kind method params))
                                     (rawInput . ,(or (agent-shell-codex-app-server--approval-raw-input method params)
-                                                     '()))))
+                                                    '()))))
                        (options . ,(map-elt request-options :options)))))))
     (puthash request-id `((:request . ,request)
+                          (:tool-call-id . ,tool-call-id)
                           (:payloads . ,(map-elt request-options :payloads)))
              (map-elt client :pending-permissions))
     translated))
+
+(defun agent-shell-codex-app-server--clear-pending-permission (client request-id)
+  "Remove pending permission REQUEST-ID from CLIENT."
+  (remhash request-id (map-elt client :pending-permissions)))
+
+(defun agent-shell-codex-app-server--clear-pending-permissions-for-tool-call (client tool-call-id)
+  "Remove pending permissions for TOOL-CALL-ID from CLIENT."
+  (when tool-call-id
+    (let (request-ids)
+      (maphash (lambda (request-id pending)
+                 (when (equal (map-elt pending :tool-call-id) tool-call-id)
+                   (push request-id request-ids)))
+               (map-elt client :pending-permissions))
+      (dolist (request-id request-ids)
+        (agent-shell-codex-app-server--clear-pending-permission client request-id)))))
+
+(defun agent-shell-codex-app-server--clear-all-pending-permissions (client)
+  "Remove all pending permissions from CLIENT."
+  (clrhash (map-elt client :pending-permissions)))
 
 (defun agent-shell-codex-app-server--respond-to-pending-prompt (client turn)
   "Resolve the active prompt in CLIENT using TURN."
@@ -1216,6 +1236,7 @@ Return an alist containing `:options' and `:payloads'."
     ("codex/event/task_complete"
      (let ((turn-id (or (map-nested-elt notification '(msg turn_id))
                         (map-elt notification 'id))))
+       (agent-shell-codex-app-server--clear-all-pending-permissions client)
        (when (map-elt client :pending-prompt)
          (agent-shell-codex-app-server--respond-to-pending-prompt
           client
@@ -1308,6 +1329,8 @@ Return an alist containing `:options' and `:payloads'."
        (when (member (map-elt item 'type)
                      '("commandExecution" "fileChange" "mcpToolCall" "dynamicToolCall" "webSearch"))
          (let ((item-id (map-elt item 'id)))
+           (agent-shell-codex-app-server--clear-pending-permissions-for-tool-call
+            client item-id)
            (if-let* ((output (map-elt item 'aggregatedOutput)))
                (puthash item-id output (map-elt client :tool-outputs))
              (when-let* ((output
@@ -1333,6 +1356,7 @@ Return an alist containing `:options' and `:payloads'."
                    (and turn-id
                         current-turn-id
                         (not (equal turn-id current-turn-id))))
+         (agent-shell-codex-app-server--clear-all-pending-permissions client)
          (unless (map-elt client :pending-prompt)
            (map-put! client :active-turn-id nil))
          (agent-shell-codex-app-server--respond-to-pending-prompt
@@ -1834,7 +1858,7 @@ pages are loaded."
 Use REQUEST-ID with OPTION-ID or CANCELLED to pick the response."
   (let ((request (gethash request-id (map-elt client :pending-permissions))))
     (when request
-      (remhash request-id (map-elt client :pending-permissions))
+      (agent-shell-codex-app-server--clear-pending-permission client request-id)
       (let* ((original-request (or (map-elt request :request) request))
              (payloads (map-elt request :payloads))
              (method (map-elt original-request 'method))
