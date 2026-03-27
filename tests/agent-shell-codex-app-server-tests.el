@@ -514,6 +514,41 @@
                    (:result . ((outcome . ((outcome . "cancelled"))))))))
     (should (= (length responses) 1))))
 
+(ert-deftest agent-shell-codex-app-server-completed-item-clears-pending-permission ()
+  "Completed tool items should clear any matching pending permission."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh")))
+    (agent-shell-codex-app-server--translate-request
+     client
+     '((method . "item/commandExecution/requestApproval")
+       (id . 75)
+       (params . ((itemId . "call-1")
+                  (command . "ls")
+                  (cwd . "/tmp")))))
+    (should (gethash 75 (map-elt client :pending-permissions)))
+    (agent-shell-codex-app-server--handle-notification
+     client
+     '((method . "item/completed")
+       (params . ((item . ((id . "call-1")
+                           (type . "commandExecution")
+                           (status . "completed")))))))
+    (should-not (gethash 75 (map-elt client :pending-permissions)))))
+
+(ert-deftest agent-shell-codex-app-server-turn-completion-clears-pending-permissions ()
+  "Turn completion should discard orphaned pending permissions."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh")))
+    (agent-shell-codex-app-server--translate-request
+     client
+     '((method . "item/permissions/requestApproval")
+       (id . 76)
+       (params . ((permissions . ((network . ((reason . "Need network")))))))))
+    (should (gethash 76 (map-elt client :pending-permissions)))
+    (agent-shell-codex-app-server--handle-notification
+     client
+     '((method . "turn/completed")
+       (params . ((turn . ((id . "turn-1")
+                           (status . "completed")))))))
+    (should-not (gethash 76 (map-elt client :pending-permissions)))))
+
 (ert-deftest agent-shell-codex-app-server-wraps-pty-processes-in-raw-shell ()
   "PTY clients should disable terminal echo/canonical mode before exec."
   (let* ((client (agent-shell-codex-app-server-make-client
