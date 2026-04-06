@@ -61,6 +61,7 @@ PTYs, while pipe-based startup can stall during initialization.")
   (setq agent-shell-codex-app-server--instance-count
         (1+ agent-shell-codex-app-server--instance-count)))
 
+;;;###autoload
 (cl-defun agent-shell-codex-app-server-make-client (&key command
                                                          command-params
                                                          environment-variables
@@ -118,6 +119,7 @@ CONNECTION-TYPE."
                                           persist-extended-history))
         (cons :shutting-down nil)))
 
+;;;###autoload
 (defun agent-shell-codex-app-server-client-p (client)
   "Return non-nil if CLIENT is a Codex app-server client."
   (eq (map-elt client :backend) 'codex-app-server))
@@ -1502,6 +1504,7 @@ Return an alist containing `:options' and `:payloads'."
        client
        (format "Codex app-server exited: %s" (string-trim event))))))
 
+;;;###autoload
 (cl-defun agent-shell-codex-app-server-subscribe-to-errors (&key client on-error buffer)
   "Subscribe CLIENT to errors using ON-ERROR in BUFFER."
   (unless on-error
@@ -1512,6 +1515,7 @@ Return an alist containing `:options' and `:payloads'."
         (alist-get :error-handlers client))
   on-error)
 
+;;;###autoload
 (cl-defun agent-shell-codex-app-server-subscribe-to-notifications (&key client on-notification buffer)
   "Subscribe CLIENT to translated notifications using ON-NOTIFICATION in BUFFER."
   (unless on-notification
@@ -1522,6 +1526,7 @@ Return an alist containing `:options' and `:payloads'."
         (alist-get :notification-handlers client))
   on-notification)
 
+;;;###autoload
 (cl-defun agent-shell-codex-app-server-subscribe-to-requests (&key client on-request buffer)
   "Subscribe CLIENT to translated requests using ON-REQUEST in BUFFER."
   (unless on-request
@@ -1621,6 +1626,7 @@ pages are loaded."
                                   (nextCursor . nil)))))))
    :on-failure on-failure))
 
+;;;###autoload
 (cl-defun agent-shell-codex-app-server-send-request (&key client
                                                        request
                                                        buffer
@@ -1849,6 +1855,7 @@ pages are loaded."
       (_
        `((decision . ,decision))))))
 
+;;;###autoload
 (cl-defun agent-shell-codex-app-server-send-permission-response (&key client
                                                                    request-id
                                                                    option-id
@@ -1896,6 +1903,7 @@ Use REQUEST-ID with OPTION-ID or CANCELLED to pick the response."
      (error "Unsupported ACP notification for Codex app-server: %s"
             (map-elt notification :method)))))
 
+;;;###autoload
 (defun agent-shell-codex-app-server-interrupt (client)
   "Interrupt the current turn for CLIENT."
   (let* ((pending (map-elt client :pending-prompt))
