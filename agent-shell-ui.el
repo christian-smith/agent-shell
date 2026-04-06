@@ -41,6 +41,11 @@
   "A hash table used to save sui content like body.
 This avoids duplicating body content in text properties which is more costly.")
 
+(defun agent-shell-ui--ensure-invisibility-support ()
+  "Enable invisible text handling in the current buffer when needed."
+  (unless buffer-invisibility-spec
+    (setq-local buffer-invisibility-spec t)))
+
 (cl-defun agent-shell-ui-make-fragment-model (&key (namespace-id "global") (block-id "1") label-left label-right body)
   "Create a fragment model alist.
 NAMESPACE-ID, BLOCK-ID, LABEL-LEFT, LABEL-RIGHT, and BODY are the keys."
@@ -94,6 +99,7 @@ For existing blocks, the current expansion state is preserved unless overridden.
                    t))))
     (unwind-protect
         (progn
+          (agent-shell-ui--ensure-invisibility-support)
           (when (or new-label-left new-label-right new-body)
             (when match
               (goto-char (prop-match-beginning match)))
