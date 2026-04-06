@@ -180,6 +180,36 @@ CONNECTION-TYPE."
   (agent-shell-codex-app-server--command-actions-kind
    (map-elt item 'commandActions)))
 
+(defun agent-shell-codex-app-server--command-text (command)
+  "Return COMMAND as a displayable string."
+  (cond
+   ((stringp command) command)
+   ((listp command) (string-join command " "))
+   (t nil)))
+
+(defun agent-shell-codex-app-server--display-kind-prefixes (kind)
+  "Return display prefixes that should be stripped for KIND."
+  (pcase kind
+    ("execute" '("execute" "run"))
+    ("search" '("search" "find"))
+    ("read" '("read"))
+    ("edit" '("edit"))
+    (_ (delq nil (list kind)))))
+
+(defun agent-shell-codex-app-server--strip-kind-prefix (text kind)
+  "Return TEXT without redundant leading KIND prefix."
+  (if (not (stringp text))
+      text
+    (let ((trimmed text)
+          (case-fold-search t))
+      (dolist (prefix (agent-shell-codex-app-server--display-kind-prefixes kind))
+        (when (and prefix
+                   (string-match (concat "\\`" (regexp-quote prefix) "[[:space:]]+")
+                                 trimmed))
+          (setq trimmed (string-trim-left
+                         (substring trimmed (match-end 0))))))
+      trimmed)))
+
 (defun agent-shell-codex-app-server--callback-buffer (client &optional buffer)
   "Return a live callback buffer for CLIENT, preferring BUFFER."
   (or (and (buffer-live-p buffer) buffer)
@@ -610,13 +640,18 @@ Use MODEL-ID and EFFORT to resolve the current mode."
   "Build a normalized tool entry from ITEM."
   (pcase (map-elt item 'type)
     ("commandExecution"
-     (let ((command (or (map-elt item 'command) "Run command")))
-       `((:title . ,command)
-         (:kind . ,(agent-shell-codex-app-server--command-kind item))
+     (let* ((kind (agent-shell-codex-app-server--command-kind item))
+            (command (or (agent-shell-codex-app-server--command-text
+                          (map-elt item 'command))
+                         "Run command"))
+            (display-command (agent-shell-codex-app-server--strip-kind-prefix
+                              command kind)))
+       `((:title . ,display-command)
+         (:kind . ,kind)
          (:command . ,command)
-         (:description . ,command)
+         (:description . ,display-command)
          (:raw-input . ((command . ,command)
-                        (description . ,command)
+                        (description . ,display-command)
                         (cwd . ,(map-elt item 'cwd)))))))
     ("fileChange"
      (let* ((change (agent-shell-codex-app-server--extract-first-file-change
@@ -1112,11 +1147,12 @@ Return an alist containing `:options' and `:payloads'."
   "Build a permission title for METHOD with PARAMS."
   (pcase method
     ((or "item/commandExecution/requestApproval" "execCommandApproval")
-     (or (map-elt params 'command)
-         (and (listp (map-elt params 'command))
-              (string-join (map-elt params 'command) " "))
-         (map-elt params 'reason)
-         "Run command"))
+     (agent-shell-codex-app-server--strip-kind-prefix
+      (or (agent-shell-codex-app-server--command-text
+           (map-elt params 'command))
+          (map-elt params 'reason)
+          "Run command")
+      (agent-shell-codex-app-server--approval-kind method params)))
     ((or "item/fileChange/requestApproval" "applyPatchApproval")
      (or (map-elt params 'reason)
          (map-elt params 'grantRoot)
@@ -1140,10 +1176,14 @@ Return an alist containing `:options' and `:payloads'."
   "Build ACP-like raw input for METHOD with PARAMS."
   (pcase method
     ((or "item/commandExecution/requestApproval" "execCommandApproval")
-     `((command . ,(or (map-elt params 'command)
-                       (and (listp (map-elt params 'command))
-                            (string-join (map-elt params 'command) " "))))
-       (description . ,(map-elt params 'reason))))
+     (let ((command (agent-shell-codex-app-server--command-text
+                     (map-elt params 'command))))
+       `((command . ,command)
+         (description . ,(agent-shell-codex-app-server--strip-kind-prefix
+                          (or (map-elt params 'reason)
+                              command)
+                          (agent-shell-codex-app-server--approval-kind
+                           method params))))))
     ((or "item/fileChange/requestApproval" "applyPatchApproval")
      (let ((file-changes (map-elt params 'fileChanges)))
        (cond

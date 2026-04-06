@@ -185,6 +185,18 @@
     (should (equal (map-elt (map-elt entry :raw-input) 'cwd)
                    "/tmp"))))
 
+(ert-deftest agent-shell-codex-app-server-execute-tools-strip-run-prefix ()
+  "Execute tool labels should not repeat a leading run verb."
+  (let* ((item '((id . "tool-1")
+                 (type . "commandExecution")
+                 (command . "Run cargo fmt")
+                 (cwd . "/tmp")))
+         (entry (agent-shell-codex-app-server--tool-entry-from-item item)))
+    (should (equal (map-elt entry :kind) "execute"))
+    (should (equal (map-elt entry :title) "cargo fmt"))
+    (should (equal (map-elt entry :description) "cargo fmt"))
+    (should (equal (map-elt entry :command) "Run cargo fmt"))))
+
 (ert-deftest agent-shell-codex-app-server-read-commands-use-read-kind ()
   "Read-only command actions should render as `read' instead of `execute'."
   (let* ((item '((id . "tool-1")
@@ -222,6 +234,24 @@
                         (cwd . "/tmp")))))))
     (should (equal (map-nested-elt translated '(params toolCall kind))
                    "read"))))
+
+(ert-deftest agent-shell-codex-app-server-execute-approvals-strip-run-prefix ()
+  "Execute approval labels should not repeat a leading run verb."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         (translated
+          (agent-shell-codex-app-server--translate-request
+           client
+           '((method . "item/commandExecution/requestApproval")
+             (id . 32)
+             (params . ((itemId . "call-1")
+                        (command . "Run cargo fmt")
+                        (cwd . "/tmp")))))))
+    (should (equal (map-nested-elt translated '(params toolCall kind))
+                   "execute"))
+    (should (equal (map-nested-elt translated '(params toolCall title))
+                   "cargo fmt"))
+    (should (equal (map-nested-elt translated '(params toolCall rawInput description))
+                   "cargo fmt"))))
 
 (ert-deftest agent-shell-codex-app-server-coalesces-command-output-deltas ()
   "Command output deltas should be coalesced before notifying the UI."
