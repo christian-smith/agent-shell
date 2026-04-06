@@ -41,6 +41,11 @@
   "A hash table used to save sui content like body.
 This avoids duplicating body content in text properties which is more costly.")
 
+(defun agent-shell-ui--ensure-invisibility-support ()
+  "Enable invisible text handling in the current buffer when needed."
+  (unless buffer-invisibility-spec
+    (setq-local buffer-invisibility-spec t)))
+
 (cl-defun agent-shell-ui-make-fragment-model (&key (namespace-id "global") (block-id "1") label-left label-right body)
   "Create a fragment model alist.
 NAMESPACE-ID, BLOCK-ID, LABEL-LEFT, LABEL-RIGHT, and BODY are the keys."
@@ -71,6 +76,7 @@ When NO-UNDO is non-nil, disable undo recording for this operation.
 
 For existing blocks, the current expansion state is preserved unless overridden."
   (save-mark-and-excursion
+    (agent-shell-ui--ensure-invisibility-support)
     (let* ((inhibit-read-only t)
            (buffer-undo-list (if no-undo t buffer-undo-list))
            (namespace-id (map-elt model :namespace-id))
