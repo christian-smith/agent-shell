@@ -816,9 +816,9 @@ Please read through this section before filing issues or feature requests. I won
 - *Your agent-shell config*: Share any relevant =agent-shell= variable settings from your Emacs config.
 - *Profiling data* (for performance issues): Use =M-x profiler-start=, reproduce the issue, then =M-x profiler-report= (and =M-x profiler-stop=). Share the report.
 
-** Why doesn't =agent-shell= offer all slash commands available in CLI agent?
+** Why doesn't =agent-shell= offer all slash commands/skills available in CLI agent?
 
-=agent-shell= can only offer the slash commands advertised by the agent via [[https://agentclientprotocol.com][Agent Client Protocol]]. To view what's exposed by your agent, expand the "Available /commands" section. Is the command you're after missing? Please consider filing a feature-request with the respective agent (ie. Gemini CLI) or their ACP layer (claude-code-acp).
+=agent-shell= can only offer the slash commands/skills advertised by the agent via [[https://agentclientprotocol.com][Agent Client Protocol]]. To view what's exposed by your agent, expand the "Available /commands" section. Is the command you're after missing? Please consider filing a feature-request with the respective agent (ie. Gemini CLI) or their ACP layer (claude-code-acp).
 
 [[file:slash-commands.png]]
 
