@@ -172,7 +172,11 @@ CONNECTION-TYPE."
   (if (and actions
            (seq-every-p #'agent-shell-codex-app-server--read-command-action-p
                         actions))
-      "read"
+      (if (seq-some (lambda (action)
+                      (equal (map-elt action 'type) "search"))
+                    actions)
+          "search"
+        "read")
     "execute"))
 
 (defun agent-shell-codex-app-server--command-kind (item)

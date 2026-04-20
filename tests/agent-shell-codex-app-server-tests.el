@@ -209,6 +209,18 @@
     (should (equal (map-elt entry :description)
                    "/bin/zsh -lc \"sed -n '1,220p' foo.txt\""))))
 
+(ert-deftest agent-shell-codex-app-server-search-commands-use-search-kind ()
+  "Search command actions should render as `search' instead of `read'."
+  (let* ((item '((id . "tool-1")
+                 (type . "commandExecution")
+                 (command . "/bin/zsh -lc \"rg -n foo src\"")
+                 (commandActions . (((type . "search"))))
+                 (cwd . "/tmp")))
+         (entry (agent-shell-codex-app-server--tool-entry-from-item item)))
+    (should (equal (map-elt entry :kind) "search"))
+    (should (equal (map-elt entry :description)
+                   "/bin/zsh -lc \"rg -n foo src\""))))
+
 (ert-deftest agent-shell-codex-app-server-mixed-command-actions-use-execute-kind ()
   "Mixed or unknown command actions should stay `execute'."
   (let* ((item '((id . "tool-1")
@@ -234,6 +246,21 @@
                         (cwd . "/tmp")))))))
     (should (equal (map-nested-elt translated '(params toolCall kind))
                    "read"))))
+
+(ert-deftest agent-shell-codex-app-server-search-command-approvals-use-search-kind ()
+  "Search command approvals should render as `search'."
+  (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+         (translated
+          (agent-shell-codex-app-server--translate-request
+           client
+           '((method . "item/commandExecution/requestApproval")
+             (id . 32)
+             (params . ((itemId . "call-1")
+                        (command . "/bin/zsh -lc \"rg -n foo src\"")
+                        (commandActions . (((type . "search"))))
+                        (cwd . "/tmp")))))))
+    (should (equal (map-nested-elt translated '(params toolCall kind))
+                   "search"))))
 
 (ert-deftest agent-shell-codex-app-server-execute-approvals-strip-run-prefix ()
   "Execute approval labels should not repeat a leading run verb."
