@@ -4962,6 +4962,22 @@ Result is of the form ((:prompt . PROMPT) (:response . RESPONSE))."
                                          (current-buffer)))
                                 (agent-shell-buffers))))))
 
+;;;###autoload
+(cl-defun agent-shell-shell-buffer (&key viewport-buffer no-error no-create)
+  "Return an agent-shell buffer for the current context.
+
+A stable public API wrapping the internal resolver, intended for
+packages that integrate with agent-shell programmatically.
+
+Resolution order: viewport → current buffer → project buffers → prompt user.
+
+Example:
+  (agent-shell-shell-buffer)
+  (agent-shell-shell-buffer :no-error t)"
+  (agent-shell--shell-buffer :viewport-buffer viewport-buffer
+                             :no-error no-error
+                             :no-create no-create))
+
 (defun agent-shell--input ()
   "Return shell input (not yet submitted)."
   (when-let* ((shell-buffer (agent-shell--shell-buffer))
