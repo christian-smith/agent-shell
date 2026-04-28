@@ -374,7 +374,8 @@ Only appears when a session is active."
 Can be a symbol selecting a predefined style, or a list of frame strings.
 When providing custom frames, do not include leading spaces as padding
 is added automatically."
-  :type '(choice (const :tag "Wave (pulses up and down)" wave)
+  :type '(choice (const :tag "Circle (blinks)" circle)
+                 (const :tag "Wave (pulses up and down)" wave)
                  (const :tag "Dots Block (circular spin)" dots-block)
                  (const :tag "Dots Round (circular spin)" dots-round)
                  (const :tag "Wide (horizontal blocks)" wide)
@@ -6287,6 +6288,7 @@ See https://agentclientprotocol.com/protocol/session-modes for details."
   (when-let* ((agent-shell-show-busy-indicator)
               ((eq 'busy (map-nested-elt (agent-shell--state) '(:heartbeat :status))))
               (frames (pcase agent-shell-busy-indicator-frames
+                        ('circle '("●" "●" "●" "●" "●" " " " " " " " "  " "))
                         ('wave '("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█" "▇" "▆" "▅" "▄" "▃" "▂"))
                         ('dots-block '("⣷" "⣯" "⣟" "⡿" "⢿" "⣻" "⣽" "⣾"))
                         ('dots-round '("⢎⡰" "⢎⡡" "⢎⡑" "⢎⠱" "⠎⡱" "⢊⡱" "⢌⡱" "⢆⡱"))
