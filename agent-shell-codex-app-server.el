@@ -45,6 +45,7 @@ and compliance logs identify Agent Shell separately.")
   '("none" "minimal" "low" "medium" "high" "xhigh")
   "Preferred display order for Codex reasoning efforts.")
 
+(defvar agent-shell--state)
 (defvar agent-shell--version)
 (defvar agent-shell-codex-app-server--instance-count 0)
 (defvar agent-shell-codex-app-server--output-flush-interval 0.05
@@ -60,6 +61,23 @@ PTYs, while pipe-based startup can stall during initialization.")
   "Return the next unique client instance id."
   (setq agent-shell-codex-app-server--instance-count
         (1+ agent-shell-codex-app-server--instance-count)))
+
+(defun agent-shell-codex-app-server--ensure-session-title-slot (client)
+  "Ensure CLIENT's shell session has a mutable `:title' slot.
+
+Core agent-shell updates session titles with `map-put!', which can update an
+existing alist key but cannot add a missing key in place."
+  (when-let* ((buffer (map-elt client :context-buffer))
+              (_ (buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (when (and (boundp 'agent-shell--state)
+                 (map-elt agent-shell--state :session)
+                 (not (assoc :title (map-elt agent-shell--state :session))))
+        (map-put! agent-shell--state
+                  :session
+                  (map-insert (map-elt agent-shell--state :session)
+                              :title
+                              nil))))))
 
 ;;;###autoload
 (cl-defun agent-shell-codex-app-server-make-client (&key command
@@ -1718,7 +1736,9 @@ pages are loaded."
                          (when on-success
                            (funcall on-success
                                     (agent-shell-codex-app-server--session-response
-                                     client result))))
+                                     client result))
+                           (agent-shell-codex-app-server--ensure-session-title-slot
+                            client)))
            :on-failure on-failure))))
       ("session/list"
        (agent-shell-codex-app-server--list-threads-page
@@ -1748,7 +1768,9 @@ pages are loaded."
                          (when on-success
                            (funcall on-success
                                     (agent-shell-codex-app-server--session-response
-                                     client result))))
+                                     client result))
+                           (agent-shell-codex-app-server--ensure-session-title-slot
+                            client)))
            :on-failure on-failure))))
       ("session/set_model"
        (let* ((model-id (map-elt params 'modelId))

@@ -47,6 +47,24 @@
                      "Emacs Agent Shell"))
       (should (equal (map-elt notification-args :method) "initialized")))))
 
+(ert-deftest agent-shell-codex-app-server-ensures-session-title-slot ()
+  "App-server sessions should have a title slot for core title updates."
+  (let* ((target-buffer (generate-new-buffer " *agent-shell-codex-session*"))
+         (client (agent-shell-codex-app-server-make-client
+                  :command "sh"
+                  :context-buffer target-buffer)))
+    (unwind-protect
+        (with-current-buffer target-buffer
+          (setq-local agent-shell--state
+                      `((:session . ((:id . "thread-1")
+                                      (:mode-id . "reasoning:high")))))
+          (agent-shell-codex-app-server--ensure-session-title-slot client)
+          (should (assoc :title (map-elt agent-shell--state :session)))
+          (map-put! (map-elt agent-shell--state :session) :title "hello")
+          (should (equal (map-nested-elt agent-shell--state '(:session :title))
+                         "hello")))
+      (kill-buffer target-buffer))))
+
 (ert-deftest agent-shell-codex-app-server-defers-notification-callbacks ()
   "Translated notifications should be delivered off the process filter stack."
   (let* ((target-buffer (generate-new-buffer " *agent-shell-codex-app-server-test*"))
