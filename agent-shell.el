@@ -969,6 +969,7 @@ Works from both shell and viewport buffers."
                             (derived-mode-p 'agent-shell-viewport-edit-mode)))
          (shell-buffer (or (agent-shell--current-shell)
                            (user-error "Not in a shell or viewport buffer")))
+         (shell-buffer-name (buffer-name shell-buffer))
          (strategy (if (eq (buffer-local-value 'agent-shell-session-strategy shell-buffer)
                            'new-deferred)
                        'new-deferred
@@ -987,6 +988,7 @@ Works from both shell and viewport buffers."
                              :session-id session-id
                              :new-session t
                              :no-focus t)))
+      (shell-maker-set-buffer-name new-shell-buffer shell-buffer-name)
       (if (or from-viewport agent-shell-prefer-viewport-interaction)
           (agent-shell-viewport--show-buffer
            :shell-buffer new-shell-buffer)
