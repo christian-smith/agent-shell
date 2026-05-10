@@ -2968,7 +2968,7 @@ by default, RENDER-BODY-IMAGES to enable inline image rendering in body."
                 (derived-mode-p 'agent-shell-viewport-view-mode))))
     (with-current-buffer viewport-buffer
       (let ((inhibit-read-only t)
-            (auto-scroll (eobp))
+            (auto-scroll (shell-maker--should-auto-scroll-p))
             (saved-point (point-marker)))
         (when-let* ((range (agent-shell-ui-update-fragment
                             (agent-shell-ui-make-fragment-model
