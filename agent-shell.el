@@ -906,10 +906,7 @@ handles viewport mode detection, existing shell reuse, and project context."
     (unless shell-buffer
       (user-error "No agent shell buffers available for current project"))
     (if-let ((window (get-buffer-window shell-buffer)))
-        (if (and (> (count-windows) 1)
-                 (not (bound-and-true-p transient--prefix)))
-            (delete-window window)
-          (switch-to-prev-buffer))
+        (quit-restore-window window 'bury)
       (agent-shell--display-buffer shell-buffer))))
 
 ;;;###autoload
