@@ -51,6 +51,8 @@
 (declare-function agent-shell--state "agent-shell")
 (declare-function agent-shell--filter-buffer-substring "agent-shell")
 (declare-function agent-shell-buffers "agent-shell")
+(declare-function agent-shell-goto-last-interaction "agent-shell")
+(declare-function agent-shell-interaction-at-point "agent-shell")
 (declare-function agent-shell-copy-session-id "agent-shell")
 (declare-function agent-shell-cycle-session-mode "agent-shell")
 (declare-function agent-shell-interrupt "agent-shell")

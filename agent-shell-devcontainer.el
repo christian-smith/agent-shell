@@ -25,6 +25,9 @@
 
 ;;; Code:
 
+(require 'json)
+(require 'map)
+
 (declare-function agent-shell-cwd "agent-shell")
 
 (defun agent-shell-devcontainer--get-workspace-path (cwd)
