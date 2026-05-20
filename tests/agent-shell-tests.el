@@ -1604,6 +1604,41 @@ code block content
       (when (and test-buffer (buffer-live-p test-buffer))
         (kill-buffer test-buffer)))))
 
+(ert-deftest agent-shell--start-snapshots-dynamic-session-strategy ()
+  "Starting a shell should localize the effective session strategy."
+  (let ((test-buffer nil)
+        (shell-buffer nil)
+        (fake-process (start-process "fake-agent" nil "cat"))
+        (config (list (cons :buffer-name "test-agent")
+                      (cons :client-maker
+                            (lambda (_buf)
+                              (list (cons :command "cat")))))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'shell-maker-start)
+                   (lambda (_config &rest _args)
+                     (setq test-buffer (get-buffer-create "*test-agent-shell*"))
+                     (with-current-buffer test-buffer
+                       (setq major-mode 'agent-shell-mode))
+                     test-buffer))
+                  ((symbol-function 'shell-maker--process) (lambda () fake-process))
+                  ((symbol-function 'shell-maker-finish-output) #'ignore)
+                  ((symbol-function 'agent-shell--handle) #'ignore)
+                  (agent-shell-file-completion-enabled nil))
+          (let ((agent-shell-session-strategy 'latest))
+            (let ((agent-shell-session-strategy 'prompt))
+              (setq shell-buffer (agent-shell--start :config config
+                                                    :no-focus t
+                                                    :new-session t))))
+          (should (local-variable-p 'agent-shell-session-strategy shell-buffer))
+          (should (eq (buffer-local-value 'agent-shell-session-strategy shell-buffer)
+                      'prompt)))
+      (when (process-live-p fake-process)
+        (delete-process fake-process))
+      (when (and shell-buffer (buffer-live-p shell-buffer))
+        (kill-buffer shell-buffer))
+      (when (and test-buffer (buffer-live-p test-buffer))
+        (kill-buffer test-buffer)))))
+
 (ert-deftest agent-shell--initiate-session-prefers-list-and-load-when-supported ()
   "Test `agent-shell--initiate-session' prefers session/list + session/load."
   (with-temp-buffer

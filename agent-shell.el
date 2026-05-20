@@ -42,6 +42,7 @@
 (require 'acp)
 (eval-when-compile
   (require 'cl-lib))
+(require 'color)
 (require 'dired)
 (require 'diff)
 (require 'json)
@@ -2859,8 +2860,9 @@ variable (see makunbound)"))
         (map-put! agent-shell--state :resume-session-id session-id))
       (when fork-session-id
         (map-put! agent-shell--state :fork-session-id fork-session-id))
-      (when session-strategy
-        (setq-local agent-shell-session-strategy session-strategy))
+      ;; Snapshot the strategy also in case it was dynamically re-bound
+      (setq-local agent-shell-session-strategy
+                  (or session-strategy agent-shell-session-strategy))
       ;; Show deferred welcome text,
       ;; but first wipe buffer content.
       (let ((inhibit-read-only t))
@@ -3299,16 +3301,18 @@ A buffer-local hash table mapping cache keys to header strings.")
     (propertize session-id 'font-lock-face 'font-lock-constant-face)))
 
 (defun agent-shell--svg-fill-color (face)
-  "Return foreground color for FACE suitable as an SVG fill value.
-Resolves inherited attributes and falls back to the `default' face
-foreground when FACE has no concrete foreground (e.g., Emacs 31
-faces whose foreground arrives indirectly).  Without this fallback,
-`face-attribute' may return the symbol `unspecified', which a renderer
-treats as an invalid color and draws as black."
-  (let ((fg (face-attribute face :foreground nil t)))
-    (if (or (null fg) (eq fg 'unspecified))
-        (face-attribute 'default :foreground nil t)
-      fg)))
+  "Return foreground color for FACE as an `#rrggbb' hex string for SVG.
+Resolves FACE's `:inherit' chain and merges with the `default' face
+so the result is always specified, then converts to hex.  The hex
+form is important because Emacs face foregrounds are often X11 color
+names (e.g., `Green3' for the standard `success' face) that SVG does
+not recognize — passing them through unconverted causes the renderer
+to fall back to black."
+  (let* ((name (face-attribute face :foreground nil 'default))
+         (rgb (and (stringp name) (color-name-to-rgb name))))
+    (if rgb
+        (apply #'color-rgb-to-hex (append rgb '(2)))
+      "#ffffff")))
 
 (cl-defun agent-shell--make-header-model (state &key qualifier bindings)
   "Create a header model alist from STATE, QUALIFIER, and BINDINGS.
