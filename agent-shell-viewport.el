@@ -70,6 +70,7 @@
 (declare-function agent-shell-select-config "agent-shell")
 (declare-function agent-shell-set-session-mode "agent-shell")
 (declare-function agent-shell-set-session-model "agent-shell")
+(declare-function agent-shell-set-session-thought-level "agent-shell")
 (declare-function agent-shell-ui-backward-block "agent-shell")
 (declare-function agent-shell-ui-forward-block "agent-shell")
 (declare-function agent-shell-ui-mode "agent-shell")
@@ -886,6 +887,24 @@ buffer from the snapshot and switch to edit mode."
            (with-current-buffer viewport-buffer
              (agent-shell-viewport--update-header))))))))
 
+(defun agent-shell-viewport-set-session-thought-level ()
+  "Set thought level (reasoning effort) for the current session."
+  (declare (modes agent-shell-viewport-view-mode
+                  agent-shell-viewport-edit-mode))
+  (interactive)
+  (agent-shell-viewport--ensure-buffer)
+  (let* ((shell-buffer (or (agent-shell--current-shell)
+                           (user-error "Not in an agent-shell buffer")))
+         (viewport-buffer (agent-shell-viewport--buffer
+                          :shell-buffer shell-buffer
+                          :existing-only t)))
+    (with-current-buffer shell-buffer
+      (agent-shell-set-session-thought-level
+       (lambda ()
+         (when viewport-buffer
+           (with-current-buffer viewport-buffer
+             (agent-shell-viewport--update-header))))))))
+
 (defun agent-shell-viewport-cycle-session-mode ()
   "Cycle through available session modes."
   (declare (modes agent-shell-viewport-view-mode
@@ -1016,6 +1035,7 @@ VIEWPORT-BUFFER is the viewport buffer to check."
     (define-key map (kbd "C-<tab>") #'agent-shell-viewport-cycle-session-mode)
     (define-key map (kbd "C-c C-m") #'agent-shell-viewport-set-session-mode)
     (define-key map (kbd "C-c C-v") #'agent-shell-viewport-set-session-model)
+    (define-key map (kbd "C-c C-t") #'agent-shell-viewport-set-session-thought-level)
     (define-key map (kbd "C-c C-o") #'agent-shell-other-buffer)
     (define-key map (kbd "M-p") #'agent-shell-viewport-previous-history)
     (define-key map (kbd "M-n") #'agent-shell-viewport-next-history)
@@ -1052,6 +1072,7 @@ VIEWPORT-BUFFER is the viewport buffer to check."
     (define-key map (kbd "a") #'agent-shell-viewport-reply-again)
     (define-key map (kbd "c") #'agent-shell-viewport-reply-continue)
     (define-key map (kbd "s") #'agent-shell-viewport-set-session-mode)
+    (define-key map (kbd "t") #'agent-shell-viewport-set-session-thought-level)
     (define-key map (kbd "o") #'agent-shell-other-buffer)
     (define-key map (kbd "C-c C-o") #'agent-shell-other-buffer)
     (define-key map (kbd "?") #'agent-shell-viewport-help-menu)
@@ -1122,6 +1143,8 @@ VIEWPORT-BUFFER is the viewport buffer to check."
                          (:description . "Set model"))
                         ((:function . agent-shell-viewport-set-session-mode)
                          (:description . "Set mode"))
+                        ((:function . agent-shell-viewport-set-session-thought-level)
+                         (:description . "Set thought level"))
                         ((:function . agent-shell-viewport-cycle-session-mode)
                          (:description . "Cycle mode"))
                         ((:function . agent-shell-viewport-interrupt)
@@ -1180,6 +1203,8 @@ VIEWPORT-BUFFER is the viewport buffer to check."
                          (:description . "Set model"))
                         ((:function . agent-shell-viewport-set-session-mode)
                          (:description . "Set mode"))
+                        ((:function . agent-shell-viewport-set-session-thought-level)
+                         (:description . "Set thought level"))
                         ((:function . agent-shell-viewport-cycle-session-mode)
                          (:description . "Cycle mode"))
                         ((:function . agent-shell-other-buffer)
@@ -1288,14 +1313,19 @@ Automatically determines qualifier and bindings based on current major mode."
          (mode-binding (when keymap
                          (key-description (where-is-internal
                                            'agent-shell-viewport-set-session-mode
-                                           keymap t)))))
+                                           keymap t))))
+         (thought-level-binding (when keymap
+                                  (key-description (where-is-internal
+                                                    'agent-shell-viewport-set-session-thought-level
+                                                    keymap t)))))
     (when-let* ((shell-buffer (agent-shell-viewport--shell-buffer))
                 (header (with-current-buffer shell-buffer
                           (agent-shell--make-header (agent-shell--state)
                                                     :qualifier qualifier
                                                     :bindings bindings
                                                     :model-binding model-binding
-                                                    :mode-binding mode-binding))))
+                                                    :mode-binding mode-binding
+                                                    :thought-level-binding thought-level-binding))))
       (setq-local header-line-format header))))
 
 (defvar-local agent-shell-viewport--clean-up t)

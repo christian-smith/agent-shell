@@ -210,6 +210,14 @@ session :mode-id."
   (or (map-elt (agent-shell--config-option-by-category state "mode") :current-value)
       (map-nested-elt state '(:session :mode-id))))
 
+(defun agent-shell--current-thought-level-id (state)
+  "Return current thought level ID from STATE or nil if not advertised.
+
+The option is identified by ACP category \"thought_level\" per the spec:
+https://agentclientprotocol.com/protocol/session-config-options"
+  (map-elt (agent-shell--config-option-by-category state "thought_level")
+           :current-value))
+
 (defun agent-shell--get-available-models (state)
   "Return available models from STATE, preferring config options.
 
@@ -218,6 +226,14 @@ values to legacy model shape.  Otherwise returns session :models."
   (if-let ((model-option (agent-shell--config-option-by-category state "model")))
       (agent-shell--config-option-as-models model-option)
     (map-nested-elt state '(:session :models))))
+
+(defun agent-shell--get-available-thought-levels (state)
+  "Return available thought level values from STATE.
+
+Each value is an alist with :value, :name, optional :description where
+:value is the agent value and :name is a human-readable name."
+  (map-elt (agent-shell--config-option-by-category state "thought_level")
+           :options))
 
 ;;; Formatting
 

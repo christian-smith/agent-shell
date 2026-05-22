@@ -592,6 +592,21 @@ All of the above settings can be applied on a per-project basis using [[https://
                   ("C-c C-k" . agent-shell-interrupt)))
   #+end_src
 
+*** Session controls
+
+When the active agent advertises the corresponding session option, you can switch it from the shell buffer:
+
+- =C-c C-v= - Set model.
+- =C-c C-m= - Set session mode.
+- =C-c C-t= - Set thought level (reasoning effort).
+- =C-<tab>= - Cycle session mode.
+
+The current selections are shown in the header right after the agent name; click any segment to open a popup menu. The thought level segment only appears for models that expose it (e.g. Claude Sonnet/Opus with effort levels; Codex's reasoning_effort).
+
+From the viewport (=agent-shell-viewport-view-mode= / =agent-shell-viewport-edit-mode=), the same controls are bound to:
+
+- View mode: =v= (model), =s= (mode), =t= (thought level).
+- Edit mode: =C-c C-v=, =C-c C-m=, =C-c C-t=.
 
 *** Evil
 Evil users may want to rebind ~RET~ for inserting a new line in =insert

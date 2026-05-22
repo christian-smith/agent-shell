@@ -1311,6 +1311,7 @@ If DELETE is non-nil, delete the text between START and END."
   "C-c C-c" #'agent-shell-interrupt
   "C-c C-m" #'agent-shell-set-session-mode
   "C-c C-v" #'agent-shell-set-session-model
+  "C-c C-t" #'agent-shell-set-session-thought-level
   "C-c C-o" #'agent-shell-other-buffer
   "C-c C-s" #'agent-shell-set-session-config-option
   "<remap> <yank>" #'agent-shell-yank-dwim)
@@ -3324,6 +3325,8 @@ The model contains all inputs needed to render the graphical header."
     (:icon-name . ,(map-nested-elt state '(:agent-config :icon-name)))
     (:model-id . ,(map-nested-elt state '(:session :model-id)))
     (:model-name . ,(agent-shell-get-model-name state))
+    (:thought-level-id . ,(agent-shell--current-thought-level-id state))
+    (:thought-level-name . ,(agent-shell-get-thought-level-name state))
     (:mode-id . ,(map-nested-elt state '(:session :mode-id)))
     (:mode-name . ,(agent-shell-get-mode-name state))
     (:project-name . ,(agent-shell--project-name))
@@ -3349,7 +3352,7 @@ Joins all values from the model alist."
   (mapconcat (lambda (pair) (format "%s" (cdr pair)))
              model "|"))
 
-(cl-defun agent-shell--make-header (state &key qualifier bindings model-binding mode-binding)
+(cl-defun agent-shell--make-header (state &key qualifier bindings model-binding mode-binding thought-level-binding)
   "Return header text for current STATE.
 
 STATE should contain :agent-config with :icon-name, :buffer-name, and
@@ -3363,11 +3366,13 @@ BINDINGS is a list of alists defining key bindings to display, each with:
 
 MODEL-BINDING: Optional key description string for the model menu command.
 MODE-BINDING: Optional key description string for the session mode menu command.
+THOUGHT-LEVEL-BINDING: Optional key description string for the thought level
+menu command.
 When provided, included in help-echo tooltips."
   (unless state
     (error "STATE is required"))
   (let* ((header-model (agent-shell--make-header-model state :qualifier qualifier :bindings bindings))
-         (text-header (format " %s%s%s @ %s%s%s%s"
+         (text-header (format " %s%s%s%s @ %s%s%s%s"
                               (propertize (map-elt header-model :buffer-name)
                                           'font-lock-face 'font-lock-variable-name-face)
                               (if (map-elt header-model :model-name)
@@ -3380,6 +3385,18 @@ When provided, included in help-echo tooltips."
                                                             'local-map (let ((map (make-sparse-keymap)))
                                                                          (define-key map [header-line mouse-1]
                                                                                      (agent-shell--mode-line-model-menu))
+                                                                         map)))
+                                "")
+                              (if (map-elt header-model :thought-level-name)
+                                  (concat " ➤ " (propertize (map-elt header-model :thought-level-name)
+                                                            'font-lock-face 'font-lock-keyword-face
+                                                            'help-echo (concat "Click to open thought level menu "
+                                                                               (when thought-level-binding
+                                                                                 (propertize thought-level-binding 'face 'help-key-binding)))
+                                                            'mouse-face 'mode-line-highlight
+                                                            'local-map (let ((map (make-sparse-keymap)))
+                                                                         (define-key map [header-line mouse-1]
+                                                                                     (agent-shell--mode-line-thought-level-menu))
                                                                          map)))
                                 "")
                               (if (map-elt header-model :mode-name)
@@ -3476,6 +3493,18 @@ When provided, included in help-echo tooltips."
                                                                     `((fill . ,(agent-shell--svg-fill-color 'font-lock-negation-char-face))
                                                                       (dx . "8"))
                                                                     (map-elt header-model :model-name))))
+                                      ;; Thought level (optional)
+                                      (when (map-elt header-model :thought-level-id)
+                                        (dom-append-child text-node
+                                                          (dom-node 'tspan
+                                                                    `((fill . ,(agent-shell--svg-fill-color 'default))
+                                                                      (dx . "8"))
+                                                                    "➤"))
+                                        (dom-append-child text-node
+                                                          (dom-node 'tspan
+                                                                    `((fill . ,(agent-shell--svg-fill-color 'font-lock-keyword-face))
+                                                                      (dx . "8"))
+                                                                    (map-elt header-model :thought-level-name))))
                                       ;; Session mode (optional)
                                       (when (map-elt header-model :mode-id)
                                         ;; Add separator arrow
@@ -3599,7 +3628,10 @@ Returns a MIME type like \"image/png\" or \"image/jpeg\"."
                                                                    agent-shell-mode-map t))
                                   :mode-binding (key-description (where-is-internal
                                                                   'agent-shell-set-session-mode
-                                                                  agent-shell-mode-map t))))
+                                                                  agent-shell-mode-map t))
+                                  :thought-level-binding (key-description (where-is-internal
+                                                                           'agent-shell-set-session-thought-level
+                                                                           agent-shell-mode-map t))))
   (when (memq agent-shell-header-style '(text none nil))
     (force-mode-line-update)))
 
@@ -4177,6 +4209,22 @@ Call ON-SUCCESS after state is updated from the response."
      :on-failure (or on-failure
                      (lambda (acp-error _raw-message)
                        (message "Failed to change session mode: %s" acp-error))))))
+
+(cl-defun agent-shell--config-option-set-thought-level-id (&key thought-level-id on-success on-failure)
+  "Set current thought level to THOUGHT-LEVEL-ID."
+  (if-let ((option (agent-shell--config-option-by-category (agent-shell--state) "thought_level")))
+      (agent-shell--set-session-config-option
+       :config-id (map-elt option :id)
+       :value thought-level-id
+       :on-success (lambda ()
+                     (message "Thought level: %s"
+                              (agent-shell--config-option-value-name option thought-level-id))
+                     (when on-success
+                       (funcall on-success)))
+       :on-failure on-failure)
+    ;; In contrast to model and mode, there is no dedicated request type to change the
+    ;; thought level, so it is not a config option, it cannot be changed
+    (user-error "Agent does not advertise a thought level option for this session")))
 
 (cl-defun agent-shell--set-default-model (&key shell-buffer model-id on-model-changed)
   "Set default model to MODEL-ID in SHELL-BUFFER.
@@ -6554,6 +6602,12 @@ Prefers config option data when available."
          (agent-shell--get-available-modes state))
         mode-id)))
 
+(defun agent-shell-get-thought-level-name (state)
+  "Return current thought level display name from STATE or nil."
+  (when-let* ((option (agent-shell--config-option-by-category state "thought_level"))
+              (current (map-elt option :current-value)))
+    (agent-shell--config-option-value-name option current)))
+
 (defun agent-shell--busy-indicator-frame ()
   "Return busy frame string or nil if not busy."
   (when-let* ((agent-shell-show-busy-indicator)
@@ -6607,6 +6661,26 @@ For example: clicking \"[Accept Edits]\" shows a popup with all available modes.
      (reverse (agent-shell--get-available-modes (agent-shell--state))))
     menu))
 
+(defun agent-shell--mode-line-thought-level-menu ()
+  "Build a menu keymap for selecting a thought level from the mode line.
+
+Clicking the thought level segment in the header/mode-line shows this
+popup."
+  (let ((menu (make-sparse-keymap "Thought level"))
+        (shell-buffer (agent-shell--shell-buffer))
+        (current-id (agent-shell--current-thought-level-id (agent-shell--state))))
+    (seq-do
+     (lambda (value)
+       (define-key menu (vector (intern (concat "thought-level-" (map-elt value :value))))
+                   `(menu-item ,(map-elt value :name)
+                               (lambda () (interactive)
+                                 (with-current-buffer ,shell-buffer
+                                   (agent-shell--config-option-set-thought-level-id
+                                    :thought-level-id ,(map-elt value :value))))
+                               :button (:toggle . ,(equal (map-elt value :value) current-id)))))
+     (reverse (agent-shell--get-available-thought-levels (agent-shell--state))))
+    menu))
+
 (defun agent-shell--mode-line-format ()
   "Return `agent-shell''s mode-line format.
 
@@ -6639,6 +6713,19 @@ Shows \" ⧉\" when a command prefix is used."
                                                    (define-key map [mode-line mouse-1]
                                                                (agent-shell--mode-line-model-menu))
                                                    map))))
+            (when-let ((thought-level-name (agent-shell-get-thought-level-name (agent-shell--state))))
+              (concat " ➤ " (propertize thought-level-name
+                                        'face 'font-lock-keyword-face
+                                        'help-echo (concat "Click to open thought level menu "
+                                                           (propertize (key-description (where-is-internal
+                                                                                         'agent-shell-set-session-thought-level
+                                                                                         agent-shell-mode-map t))
+                                                                       'face 'help-key-binding))
+                                        'mouse-face 'mode-line-highlight
+                                        'local-map (let ((map (make-sparse-keymap)))
+                                                     (define-key map [mode-line mouse-1]
+                                                                 (agent-shell--mode-line-thought-level-menu))
+                                                     map))))
             (when-let ((mode-name (agent-shell--resolve-session-mode-name
                                    (agent-shell--current-mode-id (agent-shell--state))
                                    (agent-shell--get-available-modes (agent-shell--state)))))
@@ -6774,6 +6861,40 @@ Optionally, get notified of completion with ON-SUCCESS function."
      :model-id selected-model-id
      :on-success on-success)))
 
+(defun agent-shell-set-session-thought-level (&optional on-success)
+  "Set thought level (reasoning effort) for the current session.
+
+Optionally, get notified of completion with ON-SUCCESS function."
+  (declare (modes agent-shell-mode))
+  (interactive)
+  (unless (derived-mode-p 'agent-shell-mode)
+    (user-error "Not in an agent-shell buffer"))
+  (unless (map-nested-elt (agent-shell--state) '(:session :id))
+    (user-error "No active session"))
+  (unless (agent-shell--get-available-thought-levels (agent-shell--state))
+    (user-error "Agent does not advertise a thought level option for this session"))
+  (let* ((current-id (agent-shell--current-thought-level-id (agent-shell--state)))
+         (option (agent-shell--config-option-by-category (agent-shell--state) "thought_level"))
+         (default-name (and current-id
+                            (agent-shell--config-option-value-name option current-id)))
+         (choices (mapcar (lambda (value)
+                            (cons (map-elt value :name)
+                                  (map-elt value :value)))
+                          (agent-shell--get-available-thought-levels (agent-shell--state))))
+         (selection (completing-read "Set thought level: "
+                                     (mapcar #'car choices)
+                                     nil t nil nil default-name))
+         (selected-id (cdr (seq-find (lambda (choice)
+                                       (string= selection (car choice)))
+                                     choices))))
+    (unless selected-id
+      (user-error "Unknown thought level: %s" selection))
+    (when (and current-id (string= selected-id current-id))
+      (error "Thought level already %s" selection))
+    (agent-shell--config-option-set-thought-level-id
+     :thought-level-id selected-id
+     :on-success on-success)))
+
 (defun agent-shell-set-session-config-option (&optional on-success)
   "Set a session config option.
 
@@ -6880,6 +7001,7 @@ with ON-SUCCESS function."
     ("m" "Cycle modes" agent-shell-cycle-session-mode :transient t)
     ("M" "Set mode" agent-shell-set-session-mode :transient t)
     ("v" "Set model" agent-shell-set-session-model :transient t)
+    ("t" "Set thought level" agent-shell-set-session-thought-level :transient t)
     ("o" "Set option" agent-shell-set-session-config-option :transient t)
     ("C" "Interrupt" agent-shell-interrupt :transient t)]
    ["Shell"
