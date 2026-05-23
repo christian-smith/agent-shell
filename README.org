@@ -115,6 +115,7 @@ npm install -g @blowmage/cursor-agent-acp
 
 See https://github.com/blowmage/cursor-agent-acp-npm for details.
 
+
 *** Kimi Code CLI
 
 For Kimi Code CLI, install with:
@@ -124,6 +125,17 @@ curl -L code.kimi.com/install.sh | bash
 #+end_src
 
 See https://www.kimi.com/code for details.
+
+*** CodeBuddy
+
+For CodeBuddy agent, install the CodeBuddy CLI and ensure ACP mode is available.
+For example:
+
+#+begin_src bash
+codebuddy --acp
+#+end_src
+
+See https://www.codebuddy.ai/docs/zh/ide/Getting-Started/Installation for details.
 
 *** Kiro CLI
 
@@ -497,7 +509,7 @@ Huge thanks for /gdindi/ for finding and and describing this in https://github.c
 
 *** Customizing Available Agents
 
-By default, =agent-shell= includes configurations for all supported agents (Claude Agent, Gemini CLI, Codex, Goose, Qwen Code, and Auggie). You can customize which agents are available through the =agent-shell-agent-configs= variable.
+By default, =agent-shell= includes configurations for all supported agents (Claude Agent, Gemini CLI, Codex, Goose, Cursor, CodeBuddy, Qwen Code, and Auggie). You can customize which agents are available through the =agent-shell-agent-configs= variable.
 
 ** Usage
 
@@ -513,6 +525,7 @@ Start a specific agent shell session directly:
 
 - =M-x agent-shell-anthropic-start-claude-code= - Start a Claude Agent session
 - =M-x agent-shell-auggie-start-agent= - Start an Auggie agent session
+- =M-x agent-shell-codebuddy-start-agent= - Start a CodeBuddy agent session
 - =M-x agent-shell-openai-start-codex= - Start a Codex agent session
 - =M-x agent-shell-google-start-gemini= - Start a Gemini agent session
 - =M-x agent-shell-goose-start-agent= - Start a Goose agent session

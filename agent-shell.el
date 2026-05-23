@@ -28,7 +28,8 @@
 ;; interact with any agent powered by ACP (Agent Client Protocol).
 ;;
 ;; `agent-shell' currently provides access to Claude Code, Cursor,
-;; Gemini CLI, Goose, Codex, OpenCode, Qwen, and Auggie amongst other agents.
+;; CodeBuddy, Gemini CLI, Goose, Codex, OpenCode, Qwen, and Auggie
+;; amongst other agents.
 ;;
 ;; This package depends on the `acp' package to provide the ACP layer
 ;; as per https://agentclientprotocol.com spec.
@@ -51,6 +52,7 @@
   (error "Please update 'shell-maker' to v0.91.2 or newer"))
 (require 'agent-shell-anthropic)
 (require 'agent-shell-auggie)
+(require 'agent-shell-codebuddy)
 (require 'agent-shell-cline)
 (require 'agent-shell-completion)
 (require 'agent-shell-config)
@@ -506,9 +508,10 @@ Returns an alist with all specified values."
   "Create a list of default agent configs.
 
 This function aggregates agents from OpenAI, Anthropic, Google,
-Goose, Cursor, Auggie, and others."
+Goose, Cursor, CodeBuddy, Auggie, and others."
   (list (agent-shell-auggie-make-agent-config)
         (agent-shell-anthropic-make-claude-code-config)
+        (agent-shell-codebuddy-make-agent-config)
         (agent-shell-cline-make-agent-config)
         (agent-shell-openai-make-codex-config)
         (agent-shell-cursor-make-agent-config)
@@ -543,6 +546,7 @@ configuration alist for backwards compatibility."
   :type '(choice (const :tag "None (prompt each time)" nil)
                  (const :tag "Auggie" auggie)
                  (const :tag "Claude Code" claude-code)
+                 (const :tag "CodeBuddy" codebuddy)
                  (const :tag "Cline" cline)
                  (const :tag "Codex" codex)
                  (const :tag "Copilot" copilot)
@@ -3612,7 +3616,8 @@ When provided, included in help-echo tooltips."
 (defun agent-shell--image-type-to-mime (filename)
   "Convert image type from FILENAME to MIME type string.
 Returns a MIME type like \"image/png\" or \"image/jpeg\"."
-  (when-let ((type (image-supported-file-p filename)))
+  (when-let ((type (and (stringp filename)
+                        (image-supported-file-p filename))))
     (pcase type
       ('svg "image/svg+xml")
       (_ (format "image/%s" type)))))
