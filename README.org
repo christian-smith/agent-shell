@@ -184,6 +184,27 @@ npm install -g pi-acp
 
 See https://github.com/svkozak/pi-acp for details.
 
+*** Opencode + local ollama models
+
+For opencode coding agent, install with:
+
+#+begin_src bash
+curl -fsSL https://opencode.ai/install | bash
+#+end_src
+
+See https://opencode.ai/ for details.
+
+For local ollama models, sudo permission is needed to initialize ~ollama.service~. The following will install ollama and a local Qwen2.5:7b model.
+
+#+begin_src bash
+curl -fsSL https://ollama.com/install.sh | sh
+opencode pull qwen2.5:7b
+#+end_src
+
+If you are behind a network proxy, ~opencode pull~ will timeout. You then need to add proxy settings inside ~/etc/systemd/system/ollama.service~
+
+See https://ollama.com/ for details
+
 ** Installation
 
 =agent-shell= is powered by built-in =comint-shell=, via [[https://github.com/xenodium/shell-maker][shell-maker]], available on [[https://melpa.org/#/shell-maker][MELPA]].
@@ -423,6 +444,56 @@ For API key authentication:
 	          (string-trim
 		   (shell-command-to-string "source ~/.vibe/.env; echo $MISTRAL_API_KEY")))))
 #+end_src
+
+*** Opencode + local ollama Qwen2.5
+
+If ~opencode~ is not found by ~agent-shell~, you can add it to the search path
+
+#+begin_src emacs-lisp
+(use-package agent-shell
+      :ensure t
+      :config
+         (add-to-list 'exec-path "~/.opencode/bin/"))
+#+end_src
+
+To register the local Qwen2.5:7b model in opencode, two files needs to be edited:
+
+~./config/opencode/opencode.json~
+#+BEGIN_SRC js
+     {
+         "$schema": "https://opencode.ai/config.json",
+         "permission": {
+     	"edit": "ask",
+     	"bash": "ask",
+     	"webfetch": "allow"
+         },
+        "provider": {
+            "ollama": {
+     	   "name": "qwen2.5:7b",
+     	   "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": "http://localhost:11434/v1"
+                },
+                "models": {
+           	       "qwen2.5:7b": { "name": "Qwen2.5 7b" }
+                }
+            }
+        }
+     }
+#+END_SRC
+
+and a dummy auth file ~./local/share/opencode/auth.json~
+
+#+begin_src js
+{
+    "ollama": {
+      "type": "api",
+  	  "key": "ollama"
+    }
+}
+#+end_src
+
+Huge thanks for /gdindi/ for finding and and describing this in https://github.com/xenodium/agent-shell/issues/526
 
 *** Customizing Available Agents
 
