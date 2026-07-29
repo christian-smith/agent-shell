@@ -710,6 +710,7 @@ Each element can be:
                                               authenticate-request-maker
                                               default-model-id
                                               default-session-mode-id
+                                              default-thought-level-id
                                               session-meta
                                               mcp-servers
                                               notification-adapter
@@ -729,6 +730,9 @@ Keyword arguments:
 - AUTHENTICATE-REQUEST-MAKER: Function to create authentication requests
 - DEFAULT-MODEL-ID: Default model ID (function returning value).
 - DEFAULT-SESSION-MODE-ID: Default session mode ID (function returning value).
+- DEFAULT-THOUGHT-LEVEL-ID: Default thought level ID (function returning
+  value).  Applied after the default model, since the levels an agent
+  offers typically depend on the active model.
 - SESSION-META: Optional alist of agent-specific metadata sent as `_meta'
   with session-creating requests (`session/new', `session/load',
   `session/resume', and `session/fork').
@@ -751,6 +755,7 @@ Returns an alist with all specified values."
     (:authenticate-request-maker . ,authenticate-request-maker) ;; function
     (:default-model-id . ,default-model-id)                     ;; function
     (:default-session-mode-id . ,default-session-mode-id)       ;; function
+    (:default-thought-level-id . ,default-thought-level-id)     ;; function
     (:session-meta . ,session-meta)
     (:mcp-servers . ,mcp-servers)
     (:notification-adapter . ,notification-adapter)            ;; function
@@ -1189,6 +1194,7 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
         (cons :authenticated nil)
         (cons :set-model nil)
         (cons :set-session-mode nil)
+        (cons :set-thought-level nil)
         (cons :session (list (cons :id nil)
                              (cons :config-options nil)
                              (cons :model-id nil)
@@ -2252,6 +2258,18 @@ Flow:
             :on-mode-changed (lambda ()
                                (map-put! (agent-shell--state) :set-session-mode t)
                                (agent-shell--handle :command command :shell-buffer shell-buffer))))
+          ;; Send ACP request to set default thought level (optional)
+          ;; Comes after the default model, since available thought levels
+          ;; are typically model-specific.
+          ((and (map-nested-elt (agent-shell--state) '(:agent-config :default-thought-level-id))
+                (funcall (map-nested-elt (agent-shell--state) '(:agent-config :default-thought-level-id)))
+                (not (map-elt (agent-shell--state) :set-thought-level)))
+           (agent-shell--set-default-thought-level
+            :shell-buffer shell-buffer
+            :thought-level-id (funcall (map-nested-elt (agent-shell--state) '(:agent-config :default-thought-level-id)))
+            :on-thought-level-changed (lambda ()
+                                        (map-put! (agent-shell--state) :set-thought-level t)
+                                        (agent-shell--handle :command command :shell-buffer shell-buffer))))
           ;; Initialization complete
           (t
            (agent-shell--emit-event :event 'init-finished)
@@ -4046,7 +4064,8 @@ For example, shut down ACP client."
     (map-put! (agent-shell--state) :initialized nil)
     (map-put! (agent-shell--state) :authenticated nil)
     (map-put! (agent-shell--state) :set-model nil)
-    (map-put! (agent-shell--state) :set-session-mode nil))
+    (map-put! (agent-shell--state) :set-session-mode nil)
+    (map-put! (agent-shell--state) :set-thought-level nil))
   (agent-shell-heartbeat-stop
    :heartbeat (map-elt (agent-shell--state) :heartbeat)))
 
@@ -6070,6 +6089,7 @@ Initialization events (emitted in order):
   `init-session'        - ACP session created
   `init-model'          - Default model set (optional)
   `init-session-mode'   - Default session mode set (optional)
+  `init-thought-level'  - Default thought level set (optional)
   `session-list'        - Session list fetch initiated
   `session-prompt'      - About to prompt user for session selection
   `session-selected'    - Session chosen (new or existing)
@@ -6615,6 +6635,41 @@ Call ON-MODE-CHANGED on success."
      :on-failure (agent-shell--make-error-handler
                   :state (agent-shell--state) :shell-buffer shell-buffer))))
 
+(cl-defun agent-shell--set-default-thought-level (&key shell-buffer thought-level-id on-thought-level-changed)
+  "Set default thought level to THOUGHT-LEVEL-ID in SHELL-BUFFER.
+Call ON-THOUGHT-LEVEL-CHANGED on success.
+
+Agents only advertise thought levels for models supporting them.  When
+unavailable, report it and carry on with initialization."
+  (when (map-nested-elt (agent-shell--state) '(:session :id))
+    (with-current-buffer (map-elt agent-shell--state :buffer)
+      (agent-shell--update-bootstrapping-fragment
+       :state (agent-shell--state)
+       :block-id "set-thought-level"
+       :label-left (propertize "Setting thought level" 'font-lock-face 'agent-shell-section-heading)
+       :body (format "Requesting %s..." thought-level-id)))
+    (if (agent-shell--config-option-by-category (agent-shell--state) "thought_level")
+        (agent-shell--config-option-set-thought-level-id
+         :thought-level-id thought-level-id
+         :on-success (lambda ()
+                       (agent-shell--update-bootstrapping-fragment
+                        :state (agent-shell--state)
+                        :block-id "set-thought-level"
+                        :body "\n\nDone"
+                        :append t)
+                       (agent-shell--emit-event :event 'init-thought-level)
+                       (when on-thought-level-changed
+                         (funcall on-thought-level-changed)))
+         :on-failure (agent-shell--make-error-handler
+                      :state (agent-shell--state) :shell-buffer shell-buffer))
+      (agent-shell--update-bootstrapping-fragment
+       :state (agent-shell--state)
+       :block-id "set-thought-level"
+       :body "\n\nNot available for this session"
+       :append t)
+      (when on-thought-level-changed
+        (funcall on-thought-level-changed)))))
+
 (cl-defun agent-shell--initiate-session (&key shell-buffer on-session-init)
   "Initiate ACP session creation with SHELL-BUFFER.
 
@@ -6937,7 +6992,16 @@ overwrites an existing fragment with equivalent content."
      :block-id "set-session-mode"
      :label-left (propertize "Setting session mode"
                              'font-lock-face 'agent-shell-section-heading)
-     :body (format "Requesting %s..." mode-id))))
+     :body (format "Requesting %s..." mode-id)))
+  (when-let* ((id-fn (map-nested-elt state '(:agent-config :default-thought-level-id)))
+              (thought-level-id (funcall id-fn))
+              ((not (map-elt state :set-thought-level))))
+    (agent-shell--update-bootstrapping-fragment
+     :state state
+     :block-id "set-thought-level"
+     :label-left (propertize "Setting thought level"
+                             'font-lock-face 'agent-shell-section-heading)
+     :body (format "Requesting %s..." thought-level-id))))
 
 (defun agent-shell--display-session-options ()
   "Display available session options during bootstrapping."
