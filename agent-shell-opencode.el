@@ -80,6 +80,20 @@ when starting a new shell."
   :type '(choice (const nil) string)
   :group 'agent-shell)
 
+(defcustom agent-shell-opencode-default-model-variant
+  nil
+  "Default OpenCode model variant.
+
+OpenCode exposes model variants (provider-specific reasoning effort) as
+the \"Effort\" option displayed under \"Available config options\" when
+starting a new shell, for example \"low\", \"high\" or \"max\".
+
+Variants are model-specific, so this is applied after
+`agent-shell-opencode-default-model-id'.  It is ignored for models
+offering no variants."
+  :type '(choice (const nil) string)
+  :group 'agent-shell)
+
 (defcustom agent-shell-opencode-default-session-mode-id
   nil
   "Default OpenCode session mode ID.
@@ -129,6 +143,7 @@ Returns an agent configuration alist using `agent-shell-make-agent-config'."
                    (agent-shell-opencode-make-client :buffer buffer))
    :default-model-id (lambda () agent-shell-opencode-default-model-id)
    :default-session-mode-id (lambda () agent-shell-opencode-default-session-mode-id)
+   :default-thought-level-id (lambda () agent-shell-opencode-default-model-variant)
    :install-instructions "See https://opencode.ai/docs for installation."))
 
 ;;;###autoload

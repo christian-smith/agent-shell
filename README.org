@@ -1051,6 +1051,7 @@ always go to Evil modes if you need to with ~C-z~).
 | agent-shell-opencode-acp-command              | Command and parameters for the OpenCode client.                                 |
 | agent-shell-opencode-authentication           | Configuration for OpenCode authentication.                                      |
 | agent-shell-opencode-default-model-id         | Default OpenCode model ID.                                                      |
+| agent-shell-opencode-default-model-variant    | Default OpenCode model variant.                                                 |
 | agent-shell-opencode-default-session-mode-id  | Default OpenCode session mode ID.                                               |
 | agent-shell-opencode-environment              | Environment variables for the OpenCode client.                                  |
 | agent-shell-path-resolver-function            | Function for resolving remote paths on the local file-system, and vice versa.   |
