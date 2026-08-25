@@ -164,44 +164,6 @@ categorized as \"thought_level\":
   (or (agent-shell--config-option-get :state state :id option)
       (agent-shell--config-option-by-category state option)))
 
-(defun agent-shell--config-option-offers-value-p (option value)
-  "Return non-nil when OPTION offers VALUE.
-
-Only options enumerating their values can be checked, so an option
-advertising none (a free-form string option, for example) accepts any
-VALUE.
-
-For example:
-
-  (agent-shell--config-option-offers-value-p
-   \\='((:options . (((:value . \"low\")) ((:value . \"high\"))))) \"high\")
-  => t"
-  (or (seq-empty-p (map-elt option :options))
-      (seq-find (lambda (candidate)
-                  (equal value (map-elt candidate :value)))
-                (map-elt option :options))))
-
-(defun agent-shell--config-option-skip-reason (state option)
-  "Explain why OPTION could not be set in STATE.
-
-Names the ids the agent does offer, since agents advertise options
-conditionally and scope their values to the active model.
-
-For example:
-
-  (agent-shell--config-option-skip-reason state \"effort\")
-  => \"agent offers low, high, max\"
-
-  (agent-shell--config-option-skip-reason state \"fast\")
-  => \"agent advertises no fast option\""
-  (if-let* ((resolved (agent-shell--resolve-config-option state option)))
-      (format "agent offers %s"
-              (string-join (seq-map (lambda (candidate)
-                                      (map-elt candidate :value))
-                                    (map-elt resolved :options))
-                           ", "))
-    (format "agent advertises no %s option" option)))
-
 (defun agent-shell--select-config-options (state)
   "Return selectable (type = \"select\") config options from STATE."
   (seq-filter (lambda (option)
