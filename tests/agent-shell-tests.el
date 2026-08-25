@@ -1514,6 +1514,117 @@ the category, the option is still returned."
     (should (equal (map-elt (agent-shell--config-option-by-category state "model") :id)
                    "model_id"))))
 
+(defun agent-shell-tests--opencode-config-options-state ()
+  "Return state advertising the config options OpenCode reports over ACP.
+
+Its thought level option is `effort', categorized \"thought_level\", and
+its \"fast\" option carries no category at all."
+  (list (cons :config-options
+              (agent-shell--normalize-config-options
+               [((id . "model")
+                 (name . "Model")
+                 (category . "model")
+                 (type . "select")
+                 (currentValue . "anthropic/claude-opus-4-5")
+                 (options . [((value . "anthropic/claude-opus-4-5")
+                              (name . "Claude Opus 4.5"))]))
+                ((id . "effort")
+                 (name . "Effort")
+                 (category . "thought_level")
+                 (type . "select")
+                 (currentValue . "low")
+                 (options . [((value . "low") (name . "Low"))
+                             ((value . "high") (name . "High"))
+                             ((value . "max") (name . "Max"))]))
+                ((id . "fast")
+                 (name . "Fast mode")
+                 (type . "select")
+                 (currentValue . "off")
+                 (options . [((value . "on") (name . "On"))
+                             ((value . "off") (name . "Off"))]))]))))
+
+(ert-deftest agent-shell--resolve-config-option-by-id-test ()
+  "Test `agent-shell--resolve-config-option' matches advertised ids.
+
+Ids are what a shell lists under \"Available config options\", and are
+the only way to reach an option carrying no ACP category."
+  (let ((state (agent-shell-tests--opencode-config-options-state)))
+    (should (equal (map-elt (agent-shell--resolve-config-option state "effort") :id)
+                   "effort"))
+    (should (equal (map-elt (agent-shell--resolve-config-option state "fast") :id)
+                   "fast"))
+    (should-not (agent-shell--resolve-config-option state "nonexistent"))))
+
+(ert-deftest agent-shell--resolve-config-option-by-category-test ()
+  "Test `agent-shell--resolve-config-option' falls back to ACP categories.
+
+OpenCode names its thought level option `effort', so the spec's
+\"thought_level\" category has to resolve to it."
+  (let ((state (agent-shell-tests--opencode-config-options-state)))
+    (should (equal (map-elt (agent-shell--resolve-config-option state "thought_level") :id)
+                   "effort"))
+    (should (equal (map-elt (agent-shell--resolve-config-option state "model") :id)
+                   "model"))))
+
+(ert-deftest agent-shell--config-option-offers-value-test ()
+  "Test `agent-shell--config-option-offers-value-p'."
+  (let ((effort (agent-shell--resolve-config-option
+                 (agent-shell-tests--opencode-config-options-state) "effort")))
+    (should (agent-shell--config-option-offers-value-p effort "high"))
+    (should-not (agent-shell--config-option-offers-value-p effort "turbo")))
+  ;; An option enumerating no values accepts anything.
+  (should (agent-shell--config-option-offers-value-p '((:options . nil)) "anything")))
+
+(ert-deftest agent-shell--config-option-skip-reason-test ()
+  "Test `agent-shell--config-option-skip-reason'."
+  (let ((state (agent-shell-tests--opencode-config-options-state)))
+    (should (equal (agent-shell--config-option-skip-reason state "effort")
+                   "agent offers low, high, max"))
+    (should (equal (agent-shell--config-option-skip-reason state "reasoning")
+                   "agent advertises no reasoning option"))))
+
+(ert-deftest agent-shell--set-default-config-options-test ()
+  "Test `agent-shell--set-default-config-options' applies options in order.
+
+Entries resolve by id or category, are sent one at a time in the order
+listed, and anything the agent does not offer is skipped without
+stalling the rest of initialization."
+  (let ((sent nil)
+        (finished nil))
+    (with-temp-buffer
+      (setq-local agent-shell--state
+                  (append (list (cons :buffer (current-buffer))
+                                (cons :session (list (cons :id "session-1"))))
+                          (agent-shell-tests--opencode-config-options-state)))
+      (cl-letf (((symbol-function 'agent-shell--state)
+                 (lambda () agent-shell--state))
+                ((symbol-function 'agent-shell--update-bootstrapping-fragment)
+                 (lambda (&rest _)))
+                ((symbol-function 'agent-shell--emit-event)
+                 (lambda (&rest _)))
+                ((symbol-function 'agent-shell--set-session-config-option)
+                 (lambda (&rest args)
+                   (push (cons (plist-get args :config-id)
+                               (plist-get args :value))
+                         sent)
+                   (funcall (plist-get args :on-success)))))
+        (agent-shell--set-default-config-options
+         :shell-buffer (current-buffer)
+         :config-options '(("model" . "anthropic/claude-opus-4-5")
+                           ("thought_level" . "high")
+                           ("fast" . "on")
+                           ("reasoning" . "high")
+                           ("effort" . "turbo"))
+         :on-options-set (lambda () (setq finished t)))))
+    ;; "thought_level" resolves to the "effort" id OpenCode advertises,
+    ;; while the unadvertised "reasoning" option and the "turbo" value
+    ;; "effort" does not offer are both skipped.
+    (should (equal (reverse sent)
+                   '(("model" . "anthropic/claude-opus-4-5")
+                     ("effort" . "high")
+                     ("fast" . "on"))))
+    (should finished)))
+
 (ert-deftest agent-shell--session-from-response-config-options-test ()
   "Test `agent-shell--session-from-response' stores config options."
   (let ((session (agent-shell--session-from-response
