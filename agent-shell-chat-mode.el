@@ -161,7 +161,7 @@ so a label following it needs a full pad rather than a single newline."
     (or (= beg (point-min))
         (eq (char-before beg) ?\n))))
 
-(cl-defun agent-shell-chat--ensure-overlay (&key tag beg end props
+(cl-defun agent-shell-chat--ensure-overlay (&key tag beg end props rear-advance
                                                  (anchor-beg beg)
                                                  (anchor-end end))
   "Ensure a TAG overlay spans BEG..END carrying PROPS.
@@ -180,13 +180,19 @@ changed, leaves an unchanged buffer untouched: relabeling runs on every
 agent event, and each overlay write dirties its span for redisplay.
 
 ANCHOR-BEG..ANCHOR-END default to the span, and are widened only where
-an overlay is expected to sit somewhere its span no longer covers."
+an overlay is expected to sit somewhere its span no longer covers.
+
+With REAR-ADVANCE non-nil the overlay takes in text inserted at its end
+and is not `evaporate'd while empty, so it can hold properties over an
+input still being typed: relabeling is event-driven, so an overlay that
+stopped at the caret would never grow to cover what follows it."
   (let ((overlay (or (seq-find (lambda (overlay)
                                  (eq (overlay-get overlay 'agent-shell-chat--tag) tag))
                                (overlays-in anchor-beg (max anchor-end (1+ anchor-beg))))
-                     (let ((created (make-overlay beg end)))
+                     (let ((created (make-overlay beg end nil nil rear-advance)))
                        (overlay-put created 'agent-shell-chat--tag tag)
-                       (overlay-put created 'evaporate t)
+                       (unless rear-advance
+                         (overlay-put created 'evaporate t))
                        created))))
     (unless (and (= (overlay-start overlay) beg) (= (overlay-end overlay) end))
       (move-overlay overlay beg end))
@@ -195,6 +201,35 @@ an overlay is expected to sit somewhere its span no longer covers."
                 (overlay-put overlay property value)))
             props)
     overlay))
+
+(defun agent-shell-chat--draft-tail-indent (beg end)
+  "Return the indent a draft spanning BEG..END needs on its last line.
+
+A `line-prefix' hangs off the character a display row starts from, and a
+draft ending in a newline has none there: that row starts at end of
+buffer.  The caret would sit flush left until the first character landed
+to carry the prefix.  A string standing at that position indents the row
+instead, and gives way (to \"\") the moment there is a character for the
+prefix itself.
+
+For example, over a draft of \"one\\n\" returns the body indent, and over
+\"one\" returns \"\"."
+  (if (and (> end beg) (eq (char-before end) ?\n))
+      agent-shell-chat--body-indent
+    ""))
+
+(defun agent-shell-chat--draft-changed (draft after &rest _)
+  "Re-indent DRAFT's last line once a change to it has landed.
+
+Runs from DRAFT's own modification hooks, AFTER being non-nil once the
+change is in.  Kept off the relabel path: relabeling is event-driven and
+coalesced, so none runs between the newline that empties the last line
+and the character that fills it."
+  (when after
+    (let ((indent (agent-shell-chat--draft-tail-indent
+                   (overlay-start draft) (overlay-end draft))))
+      (unless (equal (overlay-get draft 'after-string) indent)
+        (overlay-put draft 'after-string indent)))))
 
 (defun agent-shell-chat--gc-overlays (tags kept)
   "Delete label overlays of TAGS not in KEPT (a list of overlays).
@@ -439,6 +474,32 @@ above, putting the first line of a multi-line input out of reach of
                                (if (and label-nl (not marker)) input-indent ""))
                          (cons 'wrap-prefix (if label-nl input-indent ""))))
            kept)
+          ;; Indent the live prompt's draft below its first line, which the
+          ;; marker indents.  The overlay above covers the prompt text alone,
+          ;; so no row starting past it -- a wrapped one, or one a typed
+          ;; newline began -- ever sees a prefix of its own.  Rear-advancing
+          ;; and anchored at the input's start: it has to be in place, and
+          ;; grow, as characters arrive, since no relabel runs while typing.
+          (when (and live labeled)
+            (push
+             (agent-shell-chat--ensure-overlay
+              :tag 'me-draft :beg run-end :end (point-max)
+              :rear-advance t
+              :props (list (cons 'line-prefix agent-shell-chat--body-indent)
+                           (cons 'wrap-prefix agent-shell-chat--body-indent)
+                           ;; Indents a last line left empty by a newline,
+                           ;; which the prefix cannot reach.  The hooks keep
+                           ;; it in step with what is typed.
+                           (cons 'after-string
+                                 (agent-shell-chat--draft-tail-indent
+                                  run-end (point-max)))
+                           (cons 'modification-hooks
+                                 (list #'agent-shell-chat--draft-changed))
+                           (cons 'insert-in-front-hooks
+                                 (list #'agent-shell-chat--draft-changed))
+                           (cons 'insert-behind-hooks
+                                 (list #'agent-shell-chat--draft-changed))))
+             kept))
           ;; Indent a submitted turn's input so it aligns with the response
           ;; body.  The live prompt (input flows after the marker) and empty
           ;; prompts have no input to indent.
@@ -462,7 +523,7 @@ above, putting the first line of a multi-line input out of reach of
           (setq runs (cdr runs))))
       ;; Drop stale labels whose prompt run was deleted (e.g. a live prompt a
       ;; `session/push' removed) and which no label above reached.
-      (agent-shell-chat--gc-overlays '(me me-label me-surplus me-input)
+      (agent-shell-chat--gc-overlays '(me me-label me-surplus me-input me-draft)
                                      kept)
       ;; Labels from before chat overlays stopped using `category': an upgrade
       ;; reloads this file into a running session (see
@@ -665,7 +726,7 @@ too."
     (agent-shell-unsubscribe :subscription agent-shell-chat--subscription))
   (when (timerp agent-shell-chat--relabel-timer)
     (cancel-timer agent-shell-chat--relabel-timer))
-  (dolist (tag '(me me-label me-surplus me-input agent))
+  (dolist (tag '(me me-label me-surplus me-input me-draft agent))
     (remove-overlays (point-min) (point-max) 'agent-shell-chat--tag tag))
   ;; Labels from before chat overlays stopped using `category'.
   ;; TODO: Remove after 2026-09-28 (see `agent-shell-chat--label-prompts').

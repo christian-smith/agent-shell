@@ -53,6 +53,12 @@ there."
                     (overlays-in (point-min) (point-max)))
         (lambda (a b) (< (overlay-start a) (overlay-start b)))))
 
+(defun agent-shell-chat-mode-tests--draft-overlay ()
+  "Return the overlay indenting the live prompt's draft, or nil."
+  (seq-find (lambda (overlay)
+              (eq (overlay-get overlay 'agent-shell-chat--tag) 'me-draft))
+            (overlays-in (point-min) (point-max))))
+
 (defun agent-shell-chat-mode-tests--agent-overlays ()
   "Return the agent label overlays in the current buffer."
   (seq-filter (lambda (overlay)
@@ -559,10 +565,67 @@ of a line, and that is where the covered prompt sits."
                                (eq (overlay-get overlay 'agent-shell-chat--tag)
                                    'me-input))
                              (overlays-in (point-min) (point-max)))))
-      ;; Only the submitted turn gets an indent overlay; the live prompt does not.
+      ;; Only the submitted turn gets an indent overlay; the live prompt's
+      ;; draft is covered by its own.
       (should (= 1 (length input)))
       (should (equal agent-shell-chat--body-indent
                      (overlay-get (car input) 'line-prefix))))))
+
+(ert-deftest agent-shell-chat-live-draft-indented-test ()
+  "The live prompt's draft carries the body indent below its first line.
+The marker indents the first line; this indents the lines under it, which
+the overlay covering the prompt text cannot reach.  It is in place before
+anything is typed and takes in what follows, since no relabel runs per
+keystroke."
+  (agent-shell-chat-mode-tests--with-shell
+    (agent-shell-chat-mode-tests--prompt "Claude> ")
+    (let ((agent-shell-prompt-bar-mode nil))
+      (agent-shell-chat--relabel))
+    (let ((draft (agent-shell-chat-mode-tests--draft-overlay)))
+      (should draft)
+      (should (equal agent-shell-chat--body-indent
+                     (overlay-get draft 'line-prefix)))
+      (should (equal agent-shell-chat--body-indent
+                     (overlay-get draft 'wrap-prefix)))
+      ;; Empty while nothing is typed, and grows with what is.
+      (should (= (overlay-start draft) (overlay-end draft)))
+      (goto-char (point-max))
+      (insert "first line\nsecond line")
+      (should (= (overlay-end draft) (point-max))))))
+
+(ert-deftest agent-shell-chat-draft-empty-last-line-indented-test ()
+  "A newline in the draft leaves its empty last line indented too.
+That line starts at end of buffer, where there is no character to carry
+the draft's `line-prefix', so the caret would sit flush left until the
+next one arrived.  A string standing there indents it meanwhile, and
+steps aside once a character can carry the prefix.  The draft's own
+modification hooks keep this in step, since no relabel runs while a
+prompt is being typed."
+  (agent-shell-chat-mode-tests--with-shell
+    (agent-shell-chat-mode-tests--prompt "Claude> ")
+    (let ((agent-shell-prompt-bar-mode nil))
+      (agent-shell-chat--relabel))
+    (let ((draft (agent-shell-chat-mode-tests--draft-overlay)))
+      (should draft)
+      (goto-char (point-max))
+      (should (equal "" (overlay-get draft 'after-string)))
+      (insert "one")
+      (should (equal "" (overlay-get draft 'after-string)))
+      (insert "\n")
+      (should (equal agent-shell-chat--body-indent
+                     (overlay-get draft 'after-string)))
+      ;; The first character of the new line takes over.
+      (insert "t")
+      (should (equal "" (overlay-get draft 'after-string)))
+      ;; Deleting back to the empty line brings it back.
+      (delete-char -1)
+      (should (equal agent-shell-chat--body-indent
+                     (overlay-get draft 'after-string)))
+      ;; A relabel mid-draft leaves it alone.
+      (let ((agent-shell-prompt-bar-mode nil))
+        (agent-shell-chat--relabel))
+      (should (equal agent-shell-chat--body-indent
+                     (overlay-get draft 'after-string))))))
 
 (ert-deftest agent-shell-chat-empty-submission-hidden-test ()
   "An empty submission (a prompt with another below it) is not labeled.
