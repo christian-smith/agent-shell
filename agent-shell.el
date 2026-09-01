@@ -488,7 +488,7 @@ default reuses a window already showing the file, else takes over the
 current one.  To keep the conversation in view instead, open beside it:
 
   (setq agent-shell-file-display-action
-        \='(display-buffer-pop-up-window))
+        \\='(display-buffer-pop-up-window))
 
 The window is selected either way, a link being followed to read what
 it points at.  Binary files the operating system handles never reach
@@ -543,8 +543,8 @@ Default is 100KB (102400 bytes)."
 
 Can be one of:
 
- \='graphical: Display header with icon and styled text.
- \='text: Display simple text-only header.
+ \\='graphical: Display header with icon and styled text.
+ \\='text: Display simple text-only header.
  nil: Display no header."
   :type '(choice (const :tag "Graphical" graphical)
                  (const :tag "Text only" text)
@@ -665,8 +665,8 @@ on the system is used."
   "Format to use when generating agent shell buffer names.
 
 Each element can be:
-- Default: For example \='Claude Agent @ My Project\='
-- Kebab case: For example \='claude-agent @ my-project\='
+- Default: For example \\='Claude Agent @ My Project\\='
+- Kebab case: For example \\='claude-agent @ my-project\\='
 - A function: Called with agent name and project name."
   :type '(choice (const :tag "Default" default)
                  (const :tag "Kebab case" kebab-case)
@@ -951,7 +951,7 @@ For example, to hide the Downloads and temp choices:
   (setq agent-shell-session-choices-function
         (lambda (choices)
           (seq-remove (lambda (choice)
-                        (memq (cdr choice) \='(:downloads-shell :temp-shell)))
+                        (memq (cdr choice) \\='(:downloads-shell :temp-shell)))
                       choices)))"
   :type '(choice (const :tag "Offer all choices" nil)
                  (function :tag "Transform function"))
@@ -1104,7 +1104,7 @@ The schema supports three transport variants:
 Example configuration with multiple servers:
 
   (setq agent-shell-mcp-servers
-        \='(((name . \"notion\")
+        \\='(((name . \"notion\")
            (type . \"http\")
            (url . \"https://mcp.notion.com/mcp\")
            (headers . ()))
@@ -1125,17 +1125,17 @@ for more details), you can embed a lambda for the URL that registers
 the session and returns the appropriate endpoint:
 
   (setq agent-shell-mcp-servers
-        \='(((name . \"emacs\")
+        \\='(((name . \"emacs\")
            (type . \"http\")
            (headers . ())
            (url . (lambda ()
-                    (require \='claude-code-ide-mcp-server)
+                    (require \\='claude-code-ide-mcp-server)
                     (let* ((project-dir (agent-shell-cwd))
                            (session-id (format \"agent-shell-%s-%s\"
                                          (file-name-nondirectory
                                            (directory-file-name project-dir))
                                          (format-time-string \"%Y%m%d-%H%M%S\"))))
-                      (puthash session-id `(:project-dir ,project-dir)
+                      (puthash session-id \\=`(:project-dir ,project-dir)
                                claude-code-ide-mcp-server--sessions)
                       (format \"http://localhost:%d/mcp/%s\"
                               (claude-code-ide-mcp-server-ensure-server)
@@ -9114,9 +9114,9 @@ ACP-OPTION should be a PermissionOption per ACP spec:
 
   An alist of the form:
 
-  ((\='kind . \"allow_once\")
-   (\='name . \"Allow\")
-   (\='optionId . \"allow\"))
+  ((\\='kind . \"allow_once\")
+   (\\='name . \"Allow\")
+   (\\='optionId . \"allow\"))
 
 ACP-SEEN-KINDS is a list of kinds already processed.  If kind is in
 ACP-SEEN-KINDS, omit the keybinding to avoid duplicates.

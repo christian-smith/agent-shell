@@ -188,7 +188,7 @@ fall back to searching the new-side text.  Mirrors the real Claude Code
 (ert-deftest agent-shell-diff-open-file-drops-stale-region-test ()
   "Test that jumping into a file drops a region left active in it.
 
-A range reference elsewhere (`file:2-4\=', say) leaves its lines
+A range reference elsewhere (`file:2-4', say) leaves its lines
 selected, and this jump moves point out from under that selection, so
 what it would otherwise span afterwards is neither the range nor the
 change."

@@ -5027,11 +5027,11 @@ subsequent calls from re-processing them — important for
 streaming, where the convert/replace-markup function may be
 invoked many times as content grows.
 
-One pass reads past the tag.  `agent-shell-markdown--linkify-file-references\='
-links a `path:line\=' citation sitting in an inline `code\=' span, which
+One pass reads past the tag.  `agent-shell-markdown--linkify-file-references'
+links a `path:line' citation sitting in an inline `code' span, which
 agents write nearly all of them in.  It tells those spans apart by the
 inline ranges it is handed, never by the tag, so every other tagged
-range is still left alone (see `agent-shell-markdown--linkify-url\=')."
+range is still left alone (see `agent-shell-markdown--linkify-url')."
   (let ((ranges '())
         (pos (point-min))
         (limit (point-max)))
