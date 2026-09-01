@@ -1978,6 +1978,92 @@ instead."
     (user-error "No agent running"))
   (message "Copied last output"))
 
+(defun agent-shell--buffer-markdown-substring (beg end)
+  "Return the text between BEG and END as markdown, structure included.
+
+The shell shows structure the reconstructed markdown has no way to
+express: whose turn a passage belongs to, and which tool call a body
+sits under.  Both are drawn as chrome (a covered prompt, a fold
+triangle), so a plain reconstruction pastes them as terminal glyphs or
+loses them.  This renders them as headings instead: a turn opens `#', a
+group of tool calls `##', and a tool call `###'.  A group owns the
+fragments below it rather than a body of its own, so its children sit
+one level under it.
+
+The agent's own headings are pushed down to sit under those, by as many
+levels as still fit inside the six markdown allows.  A response already
+reaching `######' is left where it is rather than flattened, so nothing
+is ever silently merged into a level it did not have.
+
+A fragment whose body falls outside the region still gets its heading,
+with `...' standing in for the body, so a partial copy keeps the shape
+of what it came from.
+
+For example, a copied tool call renders as:
+
+  # Claude
+
+  ### Read README.org
+
+  file contents"
+  (let ((deepen (if-let* ((deepest (agent-shell-markdown-deepest-header beg end)))
+                    (min 3 (max 0 (- 6 deepest)))
+                  3))
+        (parts nil)
+        (headed nil)
+        (pos beg))
+    (while (< pos end)
+      (let ((section (get-text-property pos 'agent-shell-ui-section))
+            (turn (agent-shell-chat--turn-label-at pos))
+            (hidden (agent-shell-chat--hidden-range-at pos))
+            ;; Break wherever any of the three kinds of structure starts or
+            ;; stops.  They do not line up with each other, so sampling only
+            ;; one kind's boundaries steps straight over the others.
+            (next (min end
+                       (or (next-single-property-change
+                            pos 'agent-shell-ui-section nil end)
+                           end)
+                       (or (next-single-property-change
+                            pos 'shell-maker--marker nil end)
+                           end)
+                       (next-overlay-change pos))))
+        (when turn
+          (push (format "\n\n# %s\n\n" turn) parts))
+        (cond
+         ;; The fold triangle says "collapsed" about a body the copy
+         ;; carries anyway, and means nothing in a document.
+         ((eq section 'indicator))
+         ((get-text-property pos 'shell-maker--marker))
+         ((eq section 'label-left)
+          (when headed
+            (push "...\n\n" parts))
+          (let ((group (eq (map-elt (get-text-property pos 'agent-shell-ui-state) :kind)
+                           'group)))
+            (push (format "%s %s\n\n"
+                          (if group "##" "###")
+                          (string-trim (agent-shell-markdown-reconstruct pos next)))
+                  parts)
+            ;; A group heads the fragments below it, so it is not itself left
+            ;; wanting a body.
+            (setq headed (not group))))
+         ;; Chat mode covers the shell prompt with an overlay `display', so
+         ;; the buffer text under it is chrome the heading above replaces.
+         (hidden
+          (setq next (min end (map-elt hidden :end))))
+         (t
+          (let ((text (agent-shell-markdown-reconstruct pos next deepen)))
+            (unless (string-blank-p text)
+              (setq headed nil))
+            (push text parts))))
+        (setq pos next)))
+    (when headed
+      (push "..." parts))
+    ;; Headings bring their own blank line and so does the buffer text they
+    ;; sit above, which would otherwise stack up as gaps in the paste.
+    (string-trim (replace-regexp-in-string
+                  (rx "\n" (>= 2 "\n")) "\n\n"
+                  (apply #'concat (nreverse parts))))))
+
 (defun agent-shell-copy-as-markdown (beg end)
   "Copy the region between BEG and END to the kill ring as markdown.
 
@@ -1990,9 +2076,13 @@ fenced code blocks with their ```language fences, and tables.  A
 construct only partially selected (for example a single line of a
 code block) is copied verbatim as shown.
 
+Structure the shell draws as chrome becomes headings: a turn opens
+`#' and a tool call `##', with the agent's own headings pushed
+underneath.  See `agent-shell--buffer-markdown-substring'.
+
 Interactively, operates on the active region."
   (interactive "r")
-  (kill-new (agent-shell-markdown-reconstruct beg end))
+  (kill-new (agent-shell--buffer-markdown-substring beg end))
   (setq deactivate-mark t)
   (message "Copied as markdown"))
 

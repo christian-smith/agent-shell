@@ -84,6 +84,37 @@ Carries `shell-maker--marker', as shell-maker's real marker does."
                  agent-shell-chat--labeled t)
      ,@body))
 
+(ert-deftest agent-shell-chat--turn-label-at-ignores-empty-label ()
+  "Only the overlay actually drawing a label reports one.
+Chat mode gives the other overlay of the pair an empty `before-string',
+which is still non-nil, so a turn would otherwise be labelled twice."
+  (with-temp-buffer
+    (setq-local agent-shell-chat-mode t)
+    (insert "Claude> question")
+    (let ((label (make-overlay 1 3))
+          (body (make-overlay 3 9)))
+      (overlay-put label 'agent-shell-chat--tag 'me-label)
+      (overlay-put label 'before-string "Me\n\n")
+      (overlay-put body 'agent-shell-chat--tag 'me)
+      (overlay-put body 'before-string ""))
+    (should (equal (agent-shell-chat--turn-label-at 1) "Me"))
+    (should-not (agent-shell-chat--turn-label-at 3))))
+
+(ert-deftest agent-shell-chat--hidden-range-at-reports-range ()
+  "A covering overlay reports where the text it stands in for ends."
+  (with-temp-buffer
+    (setq-local agent-shell-chat-mode t)
+    (insert "Claude> question")
+    (let ((overlay (make-overlay 1 9)))
+      (overlay-put overlay 'agent-shell-chat--tag 'me-label)
+      (overlay-put overlay 'display "")
+      (overlay-put overlay 'before-string "Me\n\n"))
+    (should (equal (map-elt (agent-shell-chat--hidden-range-at 1) :start) 1))
+    (should (equal (map-elt (agent-shell-chat--hidden-range-at 1) :end) 9))
+    (should (equal (map-elt (agent-shell-chat--hidden-range-at 1) :start) 1))
+    (should (equal (map-elt (agent-shell-chat--hidden-range-at 1) :end) 9))
+    (should-not (agent-shell-chat--hidden-range-at 5))))
+
 (ert-deftest agent-shell-chat--displayed-substring-applies-overlays ()
   "Reading a region follows the screen: labels in, covered chrome out.
 Chat mode draws labels with `before-string' and hides the prompt behind

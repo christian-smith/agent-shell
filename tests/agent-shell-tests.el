@@ -4612,6 +4612,39 @@ markers."
         (should-not (text-properties-at pos copied))
         (setq pos (1+ pos))))))
 
+(ert-deftest agent-shell-buffer-markdown-substring-nests-agent-headings ()
+  "A tool call becomes a heading and the agent's headings sit under it.
+An agent heading left at its own level would outrank the structure
+around it, inverting the pasted document."
+  (with-temp-buffer
+    (insert "## Section\n\nfile contents\n")
+    (agent-shell-markdown-replace-markup :complete t)
+    (goto-char (point-min))
+    (insert "Read README.org\n\n")
+    (put-text-property (point-min) (+ (point-min) 15)
+                       'agent-shell-ui-section 'label-left)
+    (should (equal (agent-shell--buffer-markdown-substring (point-min) (point-max))
+                   "### Read README.org\n\n##### Section\n\nfile contents"))))
+
+(ert-deftest agent-shell-buffer-markdown-substring-keeps-deep-headings-put ()
+  "Agent headings already near the floor are left where they are.
+Pushing them past `######' would stop them being headings at all, and
+flattening them together would silently merge levels."
+  (with-temp-buffer
+    (insert "###### Deep\n\nbody\n")
+    (agent-shell-markdown-replace-markup :complete t)
+    (should (equal (agent-shell--buffer-markdown-substring (point-min) (point-max))
+                   "###### Deep\n\nbody"))))
+
+(ert-deftest agent-shell-buffer-markdown-substring-marks-unselected-body ()
+  "A fragment heading whose body is outside the region keeps its shape."
+  (with-temp-buffer
+    (insert "Read README.org\n\nfile contents\n")
+    (put-text-property (point-min) (+ (point-min) 15)
+                       'agent-shell-ui-section 'label-left)
+    (should (equal (agent-shell--buffer-markdown-substring (point-min) (+ (point-min) 15))
+                   "### Read README.org\n\n..."))))
+
 (ert-deftest agent-shell-filter-buffer-substring-copies-what-chat-mode-shows ()
   "Copying a labelled turn yields the label, not the prompt it covers.
 Chat mode renders \"Me\" over the shell prompt, so a copy that returned

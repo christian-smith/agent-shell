@@ -251,6 +251,58 @@ returns \"Me\\n\\nhi\"."
         (mapconcat #'identity (nreverse pieces)))
     (buffer-substring start end)))
 
+(defun agent-shell-chat--tagged-overlays-at (position)
+  "Return chat mode's own overlays starting at POSITION.
+Found by the `agent-shell-chat--tag' they carry, so overlays put here by
+anything else are left out."
+  (when (bound-and-true-p agent-shell-chat-mode)
+    (seq-filter (lambda (candidate)
+                  (and (overlay-get candidate 'agent-shell-chat--tag)
+                       (= (overlay-start candidate) position)))
+                (overlays-in position (1+ position)))))
+
+(defun agent-shell-chat--turn-label-at (position)
+  "Return the turn label chat mode draws at POSITION, or nil for none.
+
+Read from the overlay's `agent-shell-chat--tag' rather than its
+`before-string', which wraps the name in layout (blank lines, the prompt
+glyph).  An overlay drawing no label carries an empty `before-string'
+rather than none, so emptiness is what rules it out: counting it would
+label a turn twice.
+
+For example, at a submitted turn returns \"Me\"."
+  (when-let* ((labelled (seq-find
+                         (lambda (candidate)
+                           (and (memq (overlay-get candidate 'agent-shell-chat--tag)
+                                      '(me me-label agent))
+                                (not (string-empty-p
+                                      (or (overlay-get candidate 'before-string) "")))))
+                         (agent-shell-chat--tagged-overlays-at position))))
+    (if (eq (overlay-get labelled 'agent-shell-chat--tag) 'agent)
+        (agent-shell-chat--agent-name)
+      "Me")))
+
+(defun agent-shell-chat--hidden-range-at (position)
+  "Return the range chat mode draws over at POSITION, or nil for none.
+
+The text is hidden by an overlay `display' standing in its place, which
+is why a reader must not take it: it is not on screen.
+
+Keys `:start' and `:end' bound the hidden text, `:end' exclusive as in
+`buffer-substring', so a reader resumes there.
+
+For example, over a buffer reading \"Claude> question\" whose prompt is
+drawn over:
+
+  ((:start . 1) (:end . 9))
+
+putting the resume point at the \"q\" of \"question\"."
+  (when-let* ((hiding (seq-find (lambda (candidate)
+                                  (stringp (overlay-get candidate 'display)))
+                                (agent-shell-chat--tagged-overlays-at position))))
+    (list (cons :start (overlay-start hiding))
+          (cons :end (overlay-end hiding)))))
+
 (defun agent-shell-chat--draft-tail-indent (beg end)
   "Return the indent a draft spanning BEG..END needs on its last line.
 

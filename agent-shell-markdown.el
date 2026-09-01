@@ -3759,8 +3759,57 @@ inside a cell.  Each is re-established after the insert anyway."
         (setq props (cddr props))))
     (nreverse carried)))
 
-(defun agent-shell-markdown-reconstruct (beg end)
+(defun agent-shell-markdown-header-level (source)
+  "Return the heading level SOURCE opens with, or nil when it opens none.
+
+SOURCE is a span's stashed markdown, as stamped on
+`agent-shell-markdown-source'.  Only a span the renderer stashed as a
+header is considered, so a \"#\" opening a line inside a fenced code
+block is never mistaken for one.
+
+For example:
+
+  \"## Sub\"  => 2
+  \"body\"   => nil"
+  (when (string-match (rx bos (zero-or-more blank) (group (one-or-more "#"))
+                          (one-or-more blank))
+                      source)
+    (length (match-string 1 source))))
+
+(defun agent-shell-markdown-deepest-header (beg end)
+  "Return the deepest heading level rendered between BEG and END, or nil.
+
+Callers nesting the text under headings of their own use this to work
+out how far they can push the agent's headings down before running past
+the six levels markdown allows.
+
+For example, over a region rendering \"# Top\" and \"#### Deep\" returns 4,
+leaving room to push everything down two levels."
+  (let ((deepest nil)
+        (pos beg))
+    (while (< pos end)
+      (when-let* ((source (get-text-property pos 'agent-shell-markdown-source))
+                  (level (agent-shell-markdown-header-level source)))
+        (setq deepest (max level (or deepest 0))))
+      (setq pos (or (next-single-property-change
+                     pos 'agent-shell-markdown-source nil end)
+                    end)))
+    deepest))
+
+(defun agent-shell-markdown--deepen-header (source levels)
+  "Return SOURCE with its heading pushed down LEVELS, or SOURCE unchanged.
+SOURCE keeps its text when it opens no heading."
+  (if (agent-shell-markdown-header-level source)
+      (concat (make-string levels ?#) source)
+    source))
+
+(defun agent-shell-markdown-reconstruct (beg end &optional deepen)
   "Return the text between BEG and END with the original markdown restored.
+
+With DEEPEN, every heading is pushed down that many levels, so a caller
+can nest the result under headings of its own.  Applied per stashed
+span, never by scanning the output, so a \"#\" opening a line inside a
+fenced code block is left alone.
 
 Each rendered construct stashes the markdown for its span on the
 `agent-shell-markdown-source' text property.  A span fully contained
@@ -3797,7 +3846,7 @@ always fully inside the markup span, so the containment test holds)."
                      (min (1+ pos) (point-max))
                      'agent-shell-markdown-source nil (point-min))
                     beg))
-           source)
+           (if deepen (agent-shell-markdown--deepen-header source deepen) source))
           ;; Plain text, or a partially-selected span: emit as shown.
           (t (buffer-substring-no-properties pos limit)))
          parts)
