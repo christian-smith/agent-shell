@@ -224,10 +224,27 @@ For example, over a draft of \"one\\n\" returns the body indent, and over
 Runs from DRAFT's own modification hooks, AFTER being non-nil once the
 change is in.  Kept off the relabel path: relabeling is event-driven and
 coalesced, so none runs between the newline that empties the last line
-and the character that fills it."
+and the character that fills it.
+
+Stops DRAFT at the end-of-prompt marker once the turn is submitted.  The
+marker and the response that follows it both arrive at end of buffer,
+which a rear-advancing overlay takes in, indenting the response as though
+it were still being typed until the next relabel drops the overlay.
+
+For example, over a DRAFT covering \"one\\n\" sets its `after-string' to
+the body indent, and over \"one\" sets it to \"\".  Once a submission has
+made that \"one\\n<marker>\", DRAFT is left ending before the marker, with
+an `after-string' of \"\"."
   (when after
-    (let ((indent (agent-shell-chat--draft-tail-indent
-                   (overlay-start draft) (overlay-end draft))))
+    (let* ((submitted (text-property-any (overlay-start draft)
+                                         (overlay-end draft)
+                                         'shell-maker--marker t))
+           (indent (if submitted
+                       ""
+                     (agent-shell-chat--draft-tail-indent
+                      (overlay-start draft) (overlay-end draft)))))
+      (when submitted
+        (move-overlay draft (overlay-start draft) submitted))
       (unless (equal (overlay-get draft 'after-string) indent)
         (overlay-put draft 'after-string indent)))))
 

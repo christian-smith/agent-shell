@@ -627,6 +627,28 @@ prompt is being typed."
       (should (equal agent-shell-chat--body-indent
                      (overlay-get draft 'after-string))))))
 
+(ert-deftest agent-shell-chat-draft-stops-at-submission-test ()
+  "The draft overlay stops growing once the turn is submitted.
+It rear-advances so it covers what is typed without waiting for a
+relabel, but the end-of-prompt marker and the response arrive at end of
+buffer too.  Taking those in would indent the agent's output as though it
+were still the draft, until the next relabel dropped the overlay."
+  (agent-shell-chat-mode-tests--with-shell
+    (agent-shell-chat-mode-tests--prompt "Claude> ")
+    (let ((agent-shell-prompt-bar-mode nil))
+      (agent-shell-chat--relabel))
+    (let ((draft (agent-shell-chat-mode-tests--draft-overlay)))
+      (should draft)
+      (goto-char (point-max))
+      (insert "my question\n")
+      (agent-shell-chat-mode-tests--marker)
+      (insert "\nstreamed reply\n")
+      (should (equal "my question\n"
+                     (buffer-substring-no-properties (overlay-start draft)
+                                                     (overlay-end draft))))
+      ;; No stray indent left standing at the marker either.
+      (should (equal "" (overlay-get draft 'after-string))))))
+
 (ert-deftest agent-shell-chat-empty-submission-hidden-test ()
   "An empty submission (a prompt with another below it) is not labeled.
 Only the live prompt shows an empty `Me', and neither claims input."
