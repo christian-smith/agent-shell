@@ -8239,10 +8239,13 @@ Return nil when point is not on an interaction with a response.  The
 position sits right after the `<shell-maker-end-of-prompt>' delimiter, so
 it aligns with the start of the response text copied into the viewport."
   (save-excursion
-    (when-let* ((begin (ignore-errors (shell-maker--prompt-begin-position))))
-      (goto-char begin)
-      (when (re-search-forward "<shell-maker-end-of-prompt>" nil t)
-        (point)))))
+    (when-let* ((begin (ignore-errors (shell-maker--prompt-begin-position)))
+                ;; Located by property rather than by text: an agent quoting
+                ;; the delimiter back writes the same characters without it,
+                ;; and the response would then appear to start mid-sentence.
+                (marker (text-property-any begin (point-max)
+                                           'shell-maker--marker t)))
+      (next-single-property-change marker 'shell-maker--marker nil (point-max)))))
 
 (defun agent-shell--point-location (prompt-start response-start)
   "Return point's location as an alist, or nil.

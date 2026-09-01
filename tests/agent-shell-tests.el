@@ -1514,6 +1514,26 @@ the category, the option is still returned."
     (should (equal (map-elt (agent-shell--config-option-by-category state "model") :id)
                    "model_id"))))
 
+(ert-deftest agent-shell--shell-response-start-ignores-quoted-marker-test ()
+  "The response starts at shell-maker's own delimiter, not at a quoted one.
+An agent asked about `<shell-maker-end-of-prompt>' writes those
+characters back without the `shell-maker--marker' property, and reading
+them as the delimiter would report the response starting mid-sentence."
+  (with-temp-buffer
+    (insert "Claude> ask\nplain <shell-maker-end-of-prompt> text\n")
+    (cl-letf (((symbol-function 'shell-maker--prompt-begin-position)
+               (lambda () (point-min))))
+      (should-not (agent-shell--shell-response-start))))
+  (with-temp-buffer
+    (insert "Claude> ask\n"
+            (propertize "<shell-maker-end-of-prompt>" 'shell-maker--marker t)
+            "\nthe reply\n")
+    (cl-letf (((symbol-function 'shell-maker--prompt-begin-position)
+               (lambda () (point-min))))
+      (should (equal "\nthe reply\n"
+                     (buffer-substring-no-properties
+                      (agent-shell--shell-response-start) (point-max)))))))
+
 (ert-deftest agent-shell--session-from-response-config-options-test ()
   "Test `agent-shell--session-from-response' stores config options."
   (let ((session (agent-shell--session-from-response

@@ -248,6 +248,25 @@ an `after-string' of \"\"."
       (unless (equal (overlay-get draft 'after-string) indent)
         (overlay-put draft 'after-string indent)))))
 
+(defun agent-shell-chat--search-marker-forward ()
+  "Search forward for shell-maker's end-of-prompt marker.
+Returns non-nil when one is found, leaving point and the match data where
+`re-search-forward' does, so callers read the bounds from the match.
+
+Only shell-maker's own marker counts, identified by the
+`shell-maker--marker' property it carries.  An agent quoting
+\"<shell-maker-end-of-prompt>\" back in its response writes the same
+characters without that property, and labeling those would open a second
+response inside the one being read.
+
+For example, over a propertized marker returns non-nil with point just
+past it, and over the same text unpropertized returns nil."
+  (let ((found nil))
+    (while (and (not found)
+                (re-search-forward "<shell-maker-end-of-prompt>" nil t))
+      (setq found (get-text-property (match-beginning 0) 'shell-maker--marker)))
+    found))
+
 (defun agent-shell-chat--gc-overlays (tags kept)
   "Delete label overlays of TAGS not in KEPT (a list of overlays).
 Removes stale labels whose prompt run or marker was deleted (e.g. a live
@@ -307,11 +326,13 @@ above, putting the first line of a multi-line input out of reach of
                (run-end (cdar runs))
                (next-pos (caadr runs))
                (limit (or next-pos (point-max)))
-               (marker-pos (save-excursion
-                             (goto-char run-end)
-                             (when (re-search-forward
-                                    "<shell-maker-end-of-prompt>" limit t)
-                               (match-beginning 0))))
+               ;; Matched by property rather than by text: an agent quoting
+               ;; "<shell-maker-end-of-prompt>" back writes the same
+               ;; characters without it, and reading those as a boundary
+               ;; would end the turn (and hide the live prompt's marker)
+               ;; mid-response.
+               (marker-pos (text-property-any run-end limit
+                                              'shell-maker--marker t))
                (input-end (or marker-pos limit))
                (blank (string-blank-p
                        (buffer-substring-no-properties run-end input-end)))
@@ -569,7 +590,7 @@ newline would merge the input line into the response for line motion
                   (agent-shell-chat--agent-name)
                   'agent-shell-chat-agent-label))
           (kept nil))
-      (while (re-search-forward "<shell-maker-end-of-prompt>" nil t)
+      (while (agent-shell-chat--search-marker-forward)
         (let* ((mbeg (match-beginning 0))
                (mend (match-end 0))
                (end (save-excursion

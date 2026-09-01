@@ -649,6 +649,35 @@ were still the draft, until the next relabel dropped the overlay."
       ;; No stray indent left standing at the marker either.
       (should (equal "" (overlay-get draft 'after-string))))))
 
+(ert-deftest agent-shell-chat-quoted-marker-keeps-prompt-live-test ()
+  "Text matching the end-of-prompt marker does not end the live prompt.
+The marker is recognised by the `shell-maker--marker' property shell-maker
+writes, not by its characters, so a prompt mentioning the delimiter (as
+one asking about it would) is still the live prompt and still shows its
+marker."
+  (agent-shell-chat-mode-tests--with-shell
+    (insert "an earlier turn\n\n")
+    (agent-shell-chat-mode-tests--prompt "Claude> ")
+    (insert "why does <shell-maker-end-of-prompt> appear?")
+    (let ((agent-shell-prompt-bar-mode nil))
+      (agent-shell-chat--relabel))
+    (should (string-match-p
+             "❯" (agent-shell-chat-mode-tests--marker-string
+                  (car (last (agent-shell-chat-mode-tests--me-overlays))))))))
+
+(ert-deftest agent-shell-chat-quoted-marker-not-a-response-test ()
+  "A response quoting the end-of-prompt marker is labeled once.
+Agents write the delimiter back when asked about it.  Those characters
+carry no `shell-maker--marker' property, and treating them as a boundary
+renders a second agent label partway through the one response."
+  (agent-shell-chat-mode-tests--with-shell
+    (agent-shell-chat-mode-tests--prompt "Claude> ")
+    (insert "explain the delimiter\n")
+    (agent-shell-chat-mode-tests--marker)
+    (insert "\nshell-maker writes <shell-maker-end-of-prompt> after input.\n\n")
+    (agent-shell-chat--relabel)
+    (should (= 1 (length (agent-shell-chat-mode-tests--agent-overlays))))))
+
 (ert-deftest agent-shell-chat-empty-submission-hidden-test ()
   "An empty submission (a prompt with another below it) is not labeled.
 Only the live prompt shows an empty `Me', and neither claims input."
