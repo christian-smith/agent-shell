@@ -59,10 +59,10 @@ it untouched."
 
 (defun agent-shell-fakes--synth-exchange (id method params result)
   "Return a synthetic request/response pair for METHOD at ID.
-PARAMS is the request\='s params, RESULT the response\='s result.
+PARAMS is the request\\='s params, RESULT the response\\='s result.
 
   (agent-shell-fakes--synth-exchange 7 "session/new" nil
-                                     \='((sessionId . "s1")))
+                                     \\='((sessionId . "s1")))
   ;; => (((:direction . outgoing) (:kind . request)
   ;;      (:object (jsonrpc . "2.0") (method . "session/new") (id . 7)))
   ;;     ((:direction . incoming) (:kind . response)
@@ -79,7 +79,7 @@ PARAMS is the request\='s params, RESULT the response\='s result.
 Synthetic ids start above it so they cannot collide with recorded ones.
 
   (agent-shell-fakes--max-recorded-id
-   \='(((:object (id . 3))) ((:object (id . 11)))))
+   \\='(((:object (id . 3))) ((:object (id . 11)))))
   ;; => 11"
   (or (seq-max (cons 0 (seq-filter #'numberp
                                    (mapcar (lambda (item)

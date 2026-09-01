@@ -168,14 +168,14 @@ enabled, so user preference set in the shell carries over."
                #'agent-shell-completion--cleanup-minibuffer t))
 
 (defun agent-shell-completion--setup-queued-prompt (event)
-  "Enable completion in the minibuffer reading EVENT\='s queued prompt.
+  "Enable completion in the minibuffer reading EVENT\\='s queued prompt.
 
-Runs from `agent-shell-prompt-queue-setup-minibuffer-functions\=', so the
+Runs from `agent-shell-prompt-queue-setup-minibuffer-functions', so the
 queue need not know completion exists.
 
 EVENT is an alist as that hook documents, for example:
 
-  \='((:shell-buffer . #<buffer Claude Agent @ agent-shell>))"
+  \\='((:shell-buffer . #<buffer Claude Agent @ agent-shell>))"
   (when-let* ((shell-buffer (map-elt event :shell-buffer)))
     (agent-shell-completion--setup-minibuffer shell-buffer)))
 

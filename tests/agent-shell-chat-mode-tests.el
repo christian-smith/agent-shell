@@ -36,7 +36,7 @@ no newline above to carry it."
       (overlay-get me 'before-string)))
 
 (defun agent-shell-chat-mode-tests--marker-string (me)
-  "Return the string carrying ME\='s prompt marker.
+  "Return the string carrying ME\\='s prompt marker.
 It travels as the covered prompt's `display' (standing on its buffer
 positions, adding none) where the label rides the newline above; with no
 newline to ride, the label renders on ME itself and the marker rejoins it
@@ -313,7 +313,7 @@ would render two blank lines instead of one."
 A string there holds point and the cursor on the row above, so moving up
 into an input spanning several lines lands above the input rather than on
 its first line.  The label rides the newline above instead, and the marker
-travels as a `line-prefix\\='; neither occupies a buffer position, leaving
+travels as a `line-prefix'; neither occupies a buffer position, leaving
 the input reachable."
   (agent-shell-chat-mode-tests--with-shell
     (agent-shell-chat-mode-tests--prompt "Claude> ")
@@ -332,17 +332,17 @@ the input reachable."
       (should (eq ?\n (char-before (overlay-start me)))))))
 
 (ert-deftest agent-shell-chat-live-prompt-marker-not-line-prefix-test ()
-  "The live prompt's marker is a `display\=', never a `line-prefix\='.
+  "The live prompt's marker is a `display', never a `line-prefix'.
 
-A `line-prefix\=' belongs to the whole line, and the input's first line
+A `line-prefix' belongs to the whole line, and the input's first line
 shares its line with the covered prompt.  Redisplay then cannot take its
 cheap single-line path: every edit re-lays the line out, and the input
 visibly paints unindented before jumping right.
 
-Drawing the marker as the covered prompt's `display\=' costs nothing per
-edit, and still leaves the input's first line reachable by `previous-line\='
+Drawing the marker as the covered prompt's `display' costs nothing per
+edit, and still leaves the input's first line reachable by `previous-line'
 because it stands on the prompt's own buffer positions rather than adding
-any (contrast a `before-string\=', which would not -- see #786)."
+any (contrast a `before-string', which would not -- see #786)."
   (agent-shell-chat-mode-tests--with-shell
     (agent-shell-chat-mode-tests--prompt "Claude> ")
     (insert "hello\n")
@@ -383,7 +383,7 @@ line, then the marker the input follows."
 (ert-deftest agent-shell-chat-marker-renders-once-test ()
   "The prompt marker is shown once, however many rows the label spans.
 
-With no newline above to carry it, the label renders on the prompt\='s own
+With no newline above to carry it, the label renders on the prompt\\='s own
 overlay and each of its blank lines becomes a row of that line.  A marker
 travelling as a prefix would then repeat down every one of those rows,
 which is what a cleared shell renders."
@@ -401,7 +401,7 @@ which is what a cleared shell renders."
       (should-not (string-match-p "❯" (or (overlay-get me 'wrap-prefix) ""))))))
 
 (ert-deftest agent-shell-chat-label-not-indented-on-own-line-test ()
-  "A label rendering on the prompt\='s line is not indented with the input.
+  "A label rendering on the prompt\\='s line is not indented with the input.
 
 With no newline above to carry it the label renders there, so an indent
 meant for the input would shift the label too, leaving it out of line

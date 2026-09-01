@@ -166,11 +166,11 @@ so a label following it needs a full pad rather than a single newline."
                                                  (anchor-end end))
   "Ensure a TAG overlay spans BEG..END carrying PROPS.
 
-TAG is a symbol naming what the overlay is for (`me\=', `agent\=' and so
-on), held in an `agent-shell-chat--tag\=' property of its own rather
-than in `category\=': a `category\=' hands redisplay every property its
+TAG is a symbol naming what the overlay is for (`me', `agent' and so
+on), held in an `agent-shell-chat--tag' property of its own rather
+than in `category': a `category' hands redisplay every property its
 symbol carries, so a value that also names a face lends its internal face
-id and floods `*Messages*\=' with \"Invalid face reference\".  A property
+id and floods `*Messages*' with \"Invalid face reference\".  A property
 of our own carries nothing.
 
 PROPS is an alist of overlay property to value.  Reuses an existing TAG
@@ -677,7 +677,7 @@ and from `shell-maker-finish-output-hook' (which covers `clear')."
           (run-at-time 0 nil #'agent-shell-chat--relabel-buffer (current-buffer)))))
 
 (defun agent-shell-chat--decorate-prompt-region (beg end)
-  "Hide the shell prompt between BEG and END behind the `Me\=' label.
+  "Hide the shell prompt between BEG and END behind the `Me' label.
 
 Used where the prompt is read outside the shell, so it reads the way the
 shell renders its own.  Returns the overlay.
@@ -702,14 +702,14 @@ replaced by the label, a blank line, and the marker the input follows:
     overlay))
 
 (defun agent-shell-chat--decorate-queued-prompt (event)
-  "Label the queued prompt being read for EVENT\='s shell.
+  "Label the queued prompt being read for EVENT\\='s shell.
 
-Runs from `agent-shell-prompt-queue-setup-minibuffer-functions\=' with the
+Runs from `agent-shell-prompt-queue-setup-minibuffer-functions' with the
 minibuffer current, and leaves shells with chat mode off alone.
 
 EVENT is an alist as that hook documents, for example:
 
-  \='((:shell-buffer . #<buffer Claude Agent @ agent-shell>))"
+  \\='((:shell-buffer . #<buffer Claude Agent @ agent-shell>))"
   (when-let* ((shell-buffer (map-elt event :shell-buffer))
               ((buffer-local-value 'agent-shell-chat-mode shell-buffer)))
     (agent-shell-chat--decorate-prompt-region (point-min) (minibuffer-prompt-end))))
