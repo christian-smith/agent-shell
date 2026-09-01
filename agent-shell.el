@@ -682,6 +682,7 @@ Each element can be:
                                               authenticate-request-maker
                                               default-model-id
                                               default-session-mode-id
+                                              default-config-options
                                               session-meta
                                               mcp-servers
                                               notification-adapter
@@ -701,6 +702,17 @@ Keyword arguments:
 - AUTHENTICATE-REQUEST-MAKER: Function to create authentication requests
 - DEFAULT-MODEL-ID: Default model ID (function returning value).
 - DEFAULT-SESSION-MODE-ID: Default session mode ID (function returning value).
+- DEFAULT-CONFIG-OPTIONS: Default ACP session config options (function
+  returning an alist of (OPTION . VALUE), both strings).  OPTION is
+  matched against the ids the agent advertises, falling back to ACP
+  categories (\"model\", \"mode\", \"thought_level\").  The categories
+  \"model\" and \"mode\" additionally reach agents advertising no config
+  options, via the same legacy requests DEFAULT-MODEL-ID and
+  DEFAULT-SESSION-MODE-ID use.  Applied in the order listed, after
+  DEFAULT-MODEL-ID and DEFAULT-SESSION-MODE-ID, so an entry here wins
+  over either.  Order matters: options an agent scopes to the active
+  model (thought level, for example) must follow the option selecting
+  that model.
 - SESSION-META: Optional alist of agent-specific metadata sent as `_meta'
   with session-creating requests (`session/new', `session/load',
   `session/resume', and `session/fork').
@@ -723,6 +735,7 @@ Returns an alist with all specified values."
     (:authenticate-request-maker . ,authenticate-request-maker) ;; function
     (:default-model-id . ,default-model-id)                     ;; function
     (:default-session-mode-id . ,default-session-mode-id)       ;; function
+    (:default-config-options . ,default-config-options)         ;; function
     (:session-meta . ,session-meta)
     (:mcp-servers . ,mcp-servers)
     (:notification-adapter . ,notification-adapter)            ;; function
@@ -1161,6 +1174,7 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
         (cons :authenticated nil)
         (cons :set-model nil)
         (cons :set-session-mode nil)
+        (cons :set-config-options nil)
         (cons :session (list (cons :id nil)
                              (cons :config-options nil)
                              (cons :model-id nil)
@@ -2290,6 +2304,16 @@ Flow:
             :on-mode-changed (lambda ()
                                (map-put! (agent-shell--state) :set-session-mode t)
                                (agent-shell--handle :command command :shell-buffer shell-buffer))))
+          ;; Send ACP requests to set default config options (optional)
+          ((and (map-nested-elt (agent-shell--state) '(:agent-config :default-config-options))
+                (funcall (map-nested-elt (agent-shell--state) '(:agent-config :default-config-options)))
+                (not (map-elt (agent-shell--state) :set-config-options)))
+           (agent-shell--set-default-config-options
+            :shell-buffer shell-buffer
+            :config-options (funcall (map-nested-elt (agent-shell--state) '(:agent-config :default-config-options)))
+            :on-options-set (lambda ()
+                              (map-put! (agent-shell--state) :set-config-options t)
+                              (agent-shell--handle :command command :shell-buffer shell-buffer))))
           ;; Initialization complete
           (t
            (agent-shell--emit-event :event 'init-finished)
@@ -4093,7 +4117,8 @@ For example, shut down ACP client."
     (map-put! (agent-shell--state) :initialized nil)
     (map-put! (agent-shell--state) :authenticated nil)
     (map-put! (agent-shell--state) :set-model nil)
-    (map-put! (agent-shell--state) :set-session-mode nil))
+    (map-put! (agent-shell--state) :set-session-mode nil)
+    (map-put! (agent-shell--state) :set-config-options nil))
   (agent-shell-heartbeat-stop
    :heartbeat (map-elt (agent-shell--state) :heartbeat)))
 
@@ -6117,6 +6142,7 @@ Initialization events (emitted in order):
   `init-session'        - ACP session created
   `init-model'          - Default model set (optional)
   `init-session-mode'   - Default session mode set (optional)
+  `init-config-options' - Default config options applied (optional)
   `session-list'        - Session list fetch initiated
   `session-prompt'      - About to prompt user for session selection
   `session-selected'    - Session chosen (new or existing)
@@ -6673,6 +6699,162 @@ Call ON-MODE-CHANGED on success."
      :on-failure (agent-shell--make-error-handler
                   :state (agent-shell--state) :shell-buffer shell-buffer))))
 
+(defun agent-shell--default-config-option-values (state option)
+  "Return the value ids STATE advertises for OPTION.
+
+The ACP categories \"model\" and \"mode\" read through the accessors
+that unify config options with the legacy `models'/`modes' session
+fields, so they cover agents advertising no config options at all.
+Returns nil when OPTION is unknown to STATE, or constrains nothing.
+
+For example:
+
+  (agent-shell--default-config-option-values state \"thought_level\")
+  => \\='(\"low\" \"high\" \"max\")"
+  (pcase option
+    ("model" (seq-map (lambda (model)
+                        (map-elt model :model-id))
+                      (agent-shell--get-available-models state)))
+    ("mode" (seq-map (lambda (mode)
+                       (map-elt mode :id))
+                     (agent-shell--get-available-modes state)))
+    (_ (seq-map (lambda (value)
+                  (map-elt value :value))
+                (map-elt (agent-shell--resolve-config-option state option) :options)))))
+
+(defun agent-shell--default-config-option-addressable-p (state option)
+  "Return non-nil when STATE can be asked to set OPTION.
+
+\"model\" and \"mode\" are always addressable: agents advertising no
+config options still answer the legacy `session/set_model' and
+`session/set_mode' requests.  Any other OPTION has to resolve to an
+advertised config option."
+  (or (member option '("model" "mode"))
+      (agent-shell--resolve-config-option state option)))
+
+(defun agent-shell--default-config-option-settable-p (state option value)
+  "Return non-nil when STATE can be asked to set OPTION to VALUE.
+
+An option enumerating no values (a free-form string option, or one an
+agent only exposes over the legacy requests) accepts any VALUE."
+  (and (agent-shell--default-config-option-addressable-p state option)
+       (if-let* ((values (agent-shell--default-config-option-values state option)))
+           (member value values)
+         t)))
+
+(defun agent-shell--default-config-option-skip-reason (state option)
+  "Explain why OPTION could not be set in STATE.
+
+Names the ids the agent does offer, since agents advertise options
+conditionally and scope their values to the active model.
+
+For example:
+
+  (agent-shell--default-config-option-skip-reason state \"effort\")
+  => \"agent offers low, high, max\"
+
+  (agent-shell--default-config-option-skip-reason state \"fast\")
+  => \"agent advertises no fast option\""
+  (if-let* (((agent-shell--default-config-option-addressable-p state option))
+            (values (agent-shell--default-config-option-values state option)))
+      (format "agent offers %s" (string-join values ", "))
+    (format "agent advertises no %s option" option)))
+
+(cl-defun agent-shell--set-default-config-options (&key shell-buffer config-options (first t) on-options-set)
+  "Apply CONFIG-OPTIONS in SHELL-BUFFER, one at a time, in order.
+
+CONFIG-OPTIONS is an alist of (OPTION . VALUE), as described in
+`agent-shell-make-agent-config'.  Applying them in sequence (rather
+than concurrently) lets an earlier entry determine what a later one can
+choose from, since agents re-advertise their options on every change.
+
+FIRST tracks whether the next entry opens the progress report, and is
+managed by the recursion.
+
+Call ON-OPTIONS-SET once the list is exhausted."
+  (if-let* ((entry (car config-options)))
+      (agent-shell--set-default-config-option
+       :shell-buffer shell-buffer
+       :option (car entry)
+       :value (cdr entry)
+       :first first
+       :on-option-set (lambda ()
+                        (agent-shell--set-default-config-options
+                         :shell-buffer shell-buffer
+                         :config-options (cdr config-options)
+                         :first nil
+                         :on-options-set on-options-set)))
+    (agent-shell--emit-event :event 'init-config-options)
+    (when on-options-set
+      (funcall on-options-set))))
+
+(cl-defun agent-shell--set-default-config-option (&key shell-buffer option value first on-option-set)
+  "Set config OPTION to VALUE in SHELL-BUFFER, then call ON-OPTION-SET.
+
+Agents advertise options conditionally (thought levels only for models
+supporting them, for example) and scope values to the active model, so
+an unknown option or value is reported and skipped rather than
+aborting initialization.
+
+FIRST reports this as the opening line of the shared progress block,
+which later entries append their own line to."
+  (when (map-nested-elt (agent-shell--state) '(:session :id))
+    (with-current-buffer (map-elt agent-shell--state :buffer)
+      (agent-shell--update-bootstrapping-fragment
+       :state (agent-shell--state)
+       :block-id "set-config-options"
+       :label-left (propertize "Setting config options" 'font-lock-face 'agent-shell-section-heading)
+       :body (format "%s%s: requesting %s..." (if first "" "\n") option value)
+       :append t))
+    (if (agent-shell--default-config-option-settable-p (agent-shell--state) option value)
+        (agent-shell--send-default-config-option
+         :shell-buffer shell-buffer
+         :option option
+         :value value
+         :on-sent (lambda ()
+                    (agent-shell--update-bootstrapping-fragment
+                     :state (agent-shell--state)
+                     :block-id "set-config-options"
+                     :body " done"
+                     :append t)
+                    (when on-option-set
+                      (funcall on-option-set))))
+      (agent-shell--update-bootstrapping-fragment
+       :state (agent-shell--state)
+       :block-id "set-config-options"
+       :body (format " skipped (%s)"
+                     (agent-shell--default-config-option-skip-reason (agent-shell--state) option))
+       :append t)
+      (when on-option-set
+        (funcall on-option-set)))))
+
+(cl-defun agent-shell--send-default-config-option (&key shell-buffer option value on-sent)
+  "Ask the agent to set OPTION to VALUE, then call ON-SENT.
+
+The ACP categories \"model\" and \"mode\" route through the setters
+owning their legacy fallbacks, so an agent advertising no config
+options is still reachable over `session/set_model' and
+`session/set_mode'.  Any other OPTION resolves to an advertised
+config option and goes out as `session/set_config_option'.
+
+SHELL-BUFFER is where a rejected request reports its error."
+  (let ((on-failure (agent-shell--make-error-handler
+                     :state (agent-shell--state) :shell-buffer shell-buffer)))
+    (pcase option
+      ("model" (agent-shell--config-option-set-model-id
+                :model-id value
+                :on-success on-sent
+                :on-failure on-failure))
+      ("mode" (agent-shell--config-option-set-mode-id
+               :mode-id value
+               :on-success on-sent
+               :on-failure on-failure))
+      (_ (agent-shell--set-session-config-option
+          :config-id (map-elt (agent-shell--resolve-config-option (agent-shell--state) option) :id)
+          :value value
+          :on-success on-sent
+          :on-failure on-failure)))))
+
 (cl-defun agent-shell--initiate-session (&key shell-buffer on-session-init)
   "Initiate ACP session creation with SHELL-BUFFER.
 
@@ -6995,7 +7177,15 @@ overwrites an existing fragment with equivalent content."
      :block-id "set-session-mode"
      :label-left (propertize "Setting session mode"
                              'font-lock-face 'agent-shell-section-heading)
-     :body (format "Requesting %s..." mode-id))))
+     :body (format "Requesting %s..." mode-id)))
+  (when-let* ((options-fn (map-nested-elt state '(:agent-config :default-config-options)))
+              ((funcall options-fn))
+              ((not (map-elt state :set-config-options))))
+    (agent-shell--update-bootstrapping-fragment
+     :state state
+     :block-id "set-config-options"
+     :label-left (propertize "Setting config options"
+                             'font-lock-face 'agent-shell-section-heading))))
 
 (defun agent-shell--display-session-options ()
   "Display available session options during bootstrapping."

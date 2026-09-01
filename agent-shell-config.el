@@ -144,6 +144,26 @@ For example:
                   matches)
         (car matches))))
 
+(defun agent-shell--resolve-config-option (state option)
+  "Return the config option in STATE addressed by OPTION, or nil.
+
+OPTION is matched against advertised ids first, then ACP categories, so
+both what a shell lists under \"Available config options\" (\"effort\")
+and the spec's category names (\"thought_level\") reach the same option.
+Ids cast the wider net: an option outside the spec's categories, say
+\"fast\", is only addressable by id.
+
+For example, against an agent advertising an \"effort\" option
+categorized as \"thought_level\":
+
+  (agent-shell--resolve-config-option state \"effort\")
+  => \\='((:id . \"effort\") (:category . \"thought_level\") ...)
+
+  (agent-shell--resolve-config-option state \"thought_level\")
+  => \\='((:id . \"effort\") (:category . \"thought_level\") ...)"
+  (or (agent-shell--config-option-get :state state :id option)
+      (agent-shell--config-option-by-category state option)))
+
 (defun agent-shell--select-config-options (state)
   "Return selectable (type = \"select\") config options from STATE."
   (seq-filter (lambda (option)

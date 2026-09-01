@@ -1534,6 +1534,216 @@ them as the delimiter would report the response starting mid-sentence."
                      (buffer-substring-no-properties
                       (agent-shell--shell-response-start) (point-max)))))))
 
+(defun agent-shell-tests--opencode-config-options-state ()
+  "Return state advertising the config options OpenCode reports over ACP.
+
+Its thought level option is `effort', categorized \"thought_level\", and
+its \"fast\" option carries no category at all."
+  (list (cons :config-options
+              (agent-shell--normalize-config-options
+               [((id . "model")
+                 (name . "Model")
+                 (category . "model")
+                 (type . "select")
+                 (currentValue . "anthropic/claude-opus-4-5")
+                 (options . [((value . "anthropic/claude-opus-4-5")
+                              (name . "Claude Opus 4.5"))]))
+                ((id . "effort")
+                 (name . "Effort")
+                 (category . "thought_level")
+                 (type . "select")
+                 (currentValue . "low")
+                 (options . [((value . "low") (name . "Low"))
+                             ((value . "high") (name . "High"))
+                             ((value . "max") (name . "Max"))]))
+                ((id . "fast")
+                 (name . "Fast mode")
+                 (type . "select")
+                 (currentValue . "off")
+                 (options . [((value . "on") (name . "On"))
+                             ((value . "off") (name . "Off"))]))]))))
+
+(ert-deftest agent-shell--resolve-config-option-by-id-test ()
+  "Test `agent-shell--resolve-config-option' matches advertised ids.
+
+Ids are what a shell lists under \"Available config options\", and are
+the only way to reach an option carrying no ACP category."
+  (let ((state (agent-shell-tests--opencode-config-options-state)))
+    (should (equal (map-elt (agent-shell--resolve-config-option state "effort") :id)
+                   "effort"))
+    (should (equal (map-elt (agent-shell--resolve-config-option state "fast") :id)
+                   "fast"))
+    (should-not (agent-shell--resolve-config-option state "nonexistent"))))
+
+(ert-deftest agent-shell--resolve-config-option-by-category-test ()
+  "Test `agent-shell--resolve-config-option' falls back to ACP categories.
+
+OpenCode names its thought level option `effort', so the spec's
+\"thought_level\" category has to resolve to it."
+  (let ((state (agent-shell-tests--opencode-config-options-state)))
+    (should (equal (map-elt (agent-shell--resolve-config-option state "thought_level") :id)
+                   "effort"))
+    (should (equal (map-elt (agent-shell--resolve-config-option state "model") :id)
+                   "model"))))
+
+(ert-deftest agent-shell--default-config-option-values-test ()
+  "Test `agent-shell--default-config-option-values'."
+  (let ((state (agent-shell-tests--opencode-config-options-state)))
+    (should (equal (agent-shell--default-config-option-values state "effort")
+                   '("low" "high" "max")))
+    (should (equal (agent-shell--default-config-option-values state "thought_level")
+                   '("low" "high" "max")))
+    (should (equal (agent-shell--default-config-option-values state "model")
+                   '("anthropic/claude-opus-4-5")))
+    (should-not (agent-shell--default-config-option-values state "reasoning"))))
+
+(ert-deftest agent-shell--default-config-option-settable-test ()
+  "Test `agent-shell--default-config-option-settable-p'."
+  (let ((state (agent-shell-tests--opencode-config-options-state)))
+    (should (agent-shell--default-config-option-settable-p state "effort" "high"))
+    (should-not (agent-shell--default-config-option-settable-p state "effort" "turbo"))
+    (should-not (agent-shell--default-config-option-settable-p state "reasoning" "high")))
+  ;; "model" and "mode" stay settable with no config options advertised,
+  ;; since the legacy requests still reach the agent.
+  (let ((state (list (cons :session (list (cons :id "session-1"))))))
+    (should (agent-shell--default-config-option-settable-p state "model" "gpt-5.5"))
+    (should (agent-shell--default-config-option-settable-p state "mode" "plan"))
+    (should-not (agent-shell--default-config-option-settable-p state "effort" "high"))))
+
+(ert-deftest agent-shell--default-config-option-skip-reason-test ()
+  "Test `agent-shell--default-config-option-skip-reason'."
+  (let ((state (agent-shell-tests--opencode-config-options-state)))
+    (should (equal (agent-shell--default-config-option-skip-reason state "effort")
+                   "agent offers low, high, max"))
+    (should (equal (agent-shell--default-config-option-skip-reason state "reasoning")
+                   "agent advertises no reasoning option"))))
+
+(ert-deftest agent-shell--set-default-config-option-legacy-model-test ()
+  "Test a \"model\" entry falls back to the legacy ACP model request.
+
+An agent advertising no config options still answers
+`session/set_model', so `agent-shell--set-default-config-options' has
+to reach it the same way `:default-model-id' does."
+  (let ((sent-request nil)
+        (finished nil))
+    (with-temp-buffer
+      (setq-local agent-shell--state
+                  (list (cons :buffer (current-buffer))
+                        (cons :client 'test-client)
+                        (cons :session (list (cons :id "session-1")
+                                             (cons :model-id "gpt-5")
+                                             (cons :models '(((:model-id . "gpt-5"))
+                                                             ((:model-id . "gpt-5.5"))))))))
+      (cl-letf (((symbol-function 'agent-shell--state)
+                 (lambda () agent-shell--state))
+                ((symbol-function 'agent-shell--update-bootstrapping-fragment)
+                 (lambda (&rest _)))
+                ((symbol-function 'agent-shell--update-header-and-mode-line)
+                 #'ignore)
+                ((symbol-function 'agent-shell--emit-event)
+                 (lambda (&rest _)))
+                ((symbol-function 'agent-shell--send-request)
+                 (lambda (&rest args)
+                   (setq sent-request (plist-get args :request))
+                   (funcall (plist-get args :on-success) nil))))
+        (agent-shell--set-default-config-options
+         :shell-buffer (current-buffer)
+         :config-options '(("model" . "gpt-5.5"))
+         :on-options-set (lambda () (setq finished t)))))
+    (should (equal (map-elt sent-request :method) "session/set_model"))
+    (should (equal (map-nested-elt sent-request '(:params modelId)) "gpt-5.5"))
+    (should finished)))
+
+(ert-deftest agent-shell--set-default-config-option-sibling-category-test ()
+  "Test an entry naming a sibling of \"model\" is not routed as the model.
+
+Cline tags both its `provider' and `model' options with category
+\"model\", so routing on the resolved option's category would send a
+`provider' entry to the model setter, which resolves category
+\"model\" back to the model option."
+  (let ((sent nil))
+    (with-temp-buffer
+      (setq-local agent-shell--state
+                  (list (cons :buffer (current-buffer))
+                        (cons :session (list (cons :id "session-1")))
+                        (cons :config-options
+                              (agent-shell--normalize-config-options
+                               [((id . "provider")
+                                 (name . "Provider")
+                                 (category . "model")
+                                 (type . "select")
+                                 (currentValue . "openai-codex")
+                                 (options . [((value . "cline") (name . "Cline"))
+                                             ((value . "openai-codex") (name . "Codex"))]))
+                                ((id . "model")
+                                 (name . "Model")
+                                 (category . "model")
+                                 (type . "select")
+                                 (currentValue . "gpt-5.5")
+                                 (options . [((value . "gpt-5.5") (name . "GPT-5.5"))]))]))))
+      (cl-letf (((symbol-function 'agent-shell--state)
+                 (lambda () agent-shell--state))
+                ((symbol-function 'agent-shell--update-bootstrapping-fragment)
+                 (lambda (&rest _)))
+                ((symbol-function 'agent-shell--emit-event)
+                 (lambda (&rest _)))
+                ((symbol-function 'agent-shell--set-session-config-option)
+                 (lambda (&rest args)
+                   (push (cons (plist-get args :config-id)
+                               (plist-get args :value))
+                         sent)
+                   (funcall (plist-get args :on-success)))))
+        (agent-shell--set-default-config-options
+         :shell-buffer (current-buffer)
+         :config-options '(("provider" . "cline")
+                           ("model" . "gpt-5.5"))
+         :on-options-set #'ignore)))
+    (should (equal (reverse sent)
+                   '(("provider" . "cline")
+                     ("model" . "gpt-5.5"))))))
+
+(ert-deftest agent-shell--set-default-config-options-test ()
+  "Test `agent-shell--set-default-config-options' applies options in order.
+
+Entries resolve by id or category, are sent one at a time in the order
+listed, and anything the agent does not offer is skipped without
+stalling the rest of initialization."
+  (let ((sent nil)
+        (finished nil))
+    (with-temp-buffer
+      (setq-local agent-shell--state
+                  (append (list (cons :buffer (current-buffer))
+                                (cons :session (list (cons :id "session-1"))))
+                          (agent-shell-tests--opencode-config-options-state)))
+      (cl-letf (((symbol-function 'agent-shell--state)
+                 (lambda () agent-shell--state))
+                ((symbol-function 'agent-shell--update-bootstrapping-fragment)
+                 (lambda (&rest _)))
+                ((symbol-function 'agent-shell--emit-event)
+                 (lambda (&rest _)))
+                ((symbol-function 'agent-shell--set-session-config-option)
+                 (lambda (&rest args)
+                   (push (cons (plist-get args :config-id)
+                               (plist-get args :value))
+                         sent)
+                   (funcall (plist-get args :on-success)))))
+        (agent-shell--set-default-config-options
+         :shell-buffer (current-buffer)
+         :config-options '(("model" . "anthropic/claude-opus-4-5")
+                           ("thought_level" . "high")
+                           ("fast" . "on")
+                           ("reasoning" . "high")
+                           ("effort" . "turbo"))
+         :on-options-set (lambda () (setq finished t)))))
+    ;; "thought_level" resolves to the "effort" id OpenCode advertises,
+    ;; while the unadvertised "reasoning" option and the "turbo" value
+    ;; "effort" does not offer are both skipped.
+    (should (equal (reverse sent)
+                   '(("model" . "anthropic/claude-opus-4-5")
+                     ("effort" . "high")
+                     ("fast" . "on"))))
+    (should finished)))
+
 (ert-deftest agent-shell--session-from-response-config-options-test ()
   "Test `agent-shell--session-from-response' stores config options."
   (let ((session (agent-shell--session-from-response
@@ -4786,6 +4996,28 @@ interaction (e.g. \"1/2\" after switching to the latest interaction)."
             (should (equal rendered-position '((:current . 2) (:total . 2))))))
       (kill-buffer viewport-buffer)
       (kill-buffer shell-buffer))))
+
+(ert-deftest agent-shell-viewport--initialize-overrides-prompt-font-lock-face-test ()
+  "The echoed viewport prompt must override copied input font-lock faces."
+  (let ((agent-shell-header-style 'text)
+        (agent-shell-file-completion-enabled nil)
+        (prompt (propertize "Claude> inspect"
+                            'font-lock-face 'comint-highlight-input)))
+    (with-temp-buffer
+      (let ((viewport-buffer (current-buffer)))
+        (cl-letf (((symbol-function 'agent-shell-viewport--position)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'agent-shell-viewport--shell-buffer)
+                   (lambda (&rest _) viewport-buffer))
+                  ((symbol-function 'agent-shell-viewport--update-header)
+                   (lambda (&rest _))))
+          (agent-shell-viewport-view-mode)
+          (agent-shell-viewport--initialize :prompt prompt)
+          (let ((prompt-start (agent-shell-viewport--prompt-start)))
+            (should (eq (get-text-property prompt-start 'face)
+                        'agent-shell-viewport-prompt))
+            (should (eq (get-text-property prompt-start 'font-lock-face)
+                        'agent-shell-viewport-prompt))))))))
 
 (ert-deftest agent-shell--refresh-session-title-skips-when-list-unsupported ()
   "Test `agent-shell--refresh-session-title' sends no request without `list'.
