@@ -4767,6 +4767,28 @@ interaction (e.g. \"1/2\" after switching to the latest interaction)."
       (kill-buffer viewport-buffer)
       (kill-buffer shell-buffer))))
 
+(ert-deftest agent-shell-viewport--initialize-overrides-prompt-font-lock-face-test ()
+  "The echoed viewport prompt must override copied input font-lock faces."
+  (let ((agent-shell-header-style 'text)
+        (agent-shell-file-completion-enabled nil)
+        (prompt (propertize "Claude> inspect"
+                            'font-lock-face 'comint-highlight-input)))
+    (with-temp-buffer
+      (let ((viewport-buffer (current-buffer)))
+        (cl-letf (((symbol-function 'agent-shell-viewport--position)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'agent-shell-viewport--shell-buffer)
+                   (lambda (&rest _) viewport-buffer))
+                  ((symbol-function 'agent-shell-viewport--update-header)
+                   (lambda (&rest _))))
+          (agent-shell-viewport-view-mode)
+          (agent-shell-viewport--initialize :prompt prompt)
+          (let ((prompt-start (agent-shell-viewport--prompt-start)))
+            (should (eq (get-text-property prompt-start 'face)
+                        'agent-shell-viewport-prompt))
+            (should (eq (get-text-property prompt-start 'font-lock-face)
+                        'agent-shell-viewport-prompt))))))))
+
 (ert-deftest agent-shell--refresh-session-title-skips-when-list-unsupported ()
   "Test `agent-shell--refresh-session-title' sends no request without `list'.
 

@@ -383,7 +383,8 @@ Optionally set its PROMPT and RESPONSE."
                        'agent-shell-viewport-prompt t
                        'line-prefix "  "
                        'wrap-prefix "  "
-                       'face 'agent-shell-viewport-prompt)
+                       'face 'agent-shell-viewport-prompt
+                       'font-lock-face 'agent-shell-viewport-prompt)
          prompt)))
     (when response
       (insert response))
