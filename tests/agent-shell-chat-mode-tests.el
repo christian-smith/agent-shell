@@ -84,6 +84,48 @@ Carries `shell-maker--marker', as shell-maker's real marker does."
                  agent-shell-chat--labeled t)
      ,@body))
 
+(ert-deftest agent-shell-chat--displayed-substring-applies-overlays ()
+  "Reading a region follows the screen: labels in, covered chrome out.
+Chat mode draws labels with `before-string' and hides the prompt behind
+`display', neither of which `buffer-substring' can see."
+  (with-temp-buffer
+    (setq-local agent-shell-chat-mode t)
+    (insert "Claude> hi")
+    (let ((overlay (make-overlay 1 9)))
+      (overlay-put overlay 'agent-shell-chat--tag 'me)
+      (overlay-put overlay 'display "")
+      (overlay-put overlay 'before-string "Me\n\n"))
+    (should (equal (substring-no-properties
+                    (agent-shell-chat--displayed-substring (point-min) (point-max)))
+                   "Me\n\nhi"))))
+
+(ert-deftest agent-shell-chat--displayed-substring-ignores-foreign-overlays ()
+  "Only chat mode's own overlays are substituted.
+An image `display' from elsewhere must not be stringified, so overlays
+without an `agent-shell-chat--tag' are left alone."
+  (with-temp-buffer
+    (setq-local agent-shell-chat-mode t)
+    (insert "hello")
+    (let ((overlay (make-overlay 1 6)))
+      (overlay-put overlay 'display '(image :type png :file "x.png"))
+      (overlay-put overlay 'before-string "IGNORED"))
+    (should (equal (substring-no-properties
+                    (agent-shell-chat--displayed-substring (point-min) (point-max)))
+                   "hello"))))
+
+(ert-deftest agent-shell-chat--displayed-substring-passes-through-when-off ()
+  "With chat mode off the region reads as plain `buffer-substring'."
+  (with-temp-buffer
+    (setq-local agent-shell-chat-mode nil)
+    (insert "Claude> hi")
+    (let ((overlay (make-overlay 1 9)))
+      (overlay-put overlay 'agent-shell-chat--tag 'me)
+      (overlay-put overlay 'display "")
+      (overlay-put overlay 'before-string "Me\n\n"))
+    (should (equal (substring-no-properties
+                    (agent-shell-chat--displayed-substring (point-min) (point-max)))
+                   "Claude> hi"))))
+
 (ert-deftest agent-shell-chat-prompt-face-p-test ()
   "Prompt runs are recognized whether the face is a symbol or a list."
   (should (agent-shell-chat--prompt-face-p 'comint-highlight-prompt))

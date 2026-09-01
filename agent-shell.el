@@ -2108,6 +2108,10 @@ See also `agent-shell-confirm-interrupt'."
   "Return the text between START and END, adjusted for copying.
 If DELETE is non-nil, delete the text between START and END.
 
+What the buffer shows is what gets copied: chat mode's labels come along
+and the prompt and marker they cover do not, since it draws them with
+overlays rather than text (see `agent-shell-chat--displayed-substring').
+
 A paste elsewhere should give plain characters rather than agent-shell's
 implementation, so every text property is dropped: our faces, keymaps,
 cursor sensors, display overrides and internal markers all go.  One
@@ -2145,7 +2149,10 @@ START and END may be given in either order, like the stock
 mouse selection or a kill where mark > point) is normalized."
   (let* ((beg (min start end))
          (fin (max start end))
-         (text (buffer-substring beg fin)))
+         ;; Chat mode hides the prompt and shell-maker's marker behind
+         ;; overlay `display' and draws its labels with `before-string', so
+         ;; buffer text and screen disagree.  Follow the screen.
+         (text (agent-shell-chat--displayed-substring beg fin)))
     (when delete
       (delete-region beg fin))
     ;; Point collapsed indicators down before the properties go, since this

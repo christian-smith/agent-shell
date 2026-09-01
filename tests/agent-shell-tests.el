@@ -4612,6 +4612,24 @@ markers."
         (should-not (text-properties-at pos copied))
         (setq pos (1+ pos))))))
 
+(ert-deftest agent-shell-filter-buffer-substring-copies-what-chat-mode-shows ()
+  "Copying a labelled turn yields the label, not the prompt it covers.
+Chat mode renders \"Me\" over the shell prompt, so a copy that returned
+the buffer text would carry terminal chrome the user never saw."
+  (with-temp-buffer
+    (setq-local agent-shell-chat-mode t)
+    (let ((inhibit-read-only t))
+      (insert "Pi> hello\n")
+      (insert (propertize "<shell-maker-end-of-prompt>"
+                          'shell-maker--marker t 'invisible t))
+      (insert "\nworld\n"))
+    (let ((overlay (make-overlay 1 5)))
+      (overlay-put overlay 'agent-shell-chat--tag 'me)
+      (overlay-put overlay 'display "")
+      (overlay-put overlay 'before-string "Me\n\n"))
+    (should (equal (agent-shell--filter-buffer-substring (point-min) (point-max))
+                   "Me\n\nhello\n\nworld\n"))))
+
 (ert-deftest agent-shell-filter-buffer-substring-strips-shell-maker-markers ()
   "Copying drops shell-maker's markers, invisible on screen.
 A copy spanning a prompt would otherwise carry text the user never saw."
