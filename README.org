@@ -1060,6 +1060,7 @@ always go to Evil modes if you need to with ~C-z~).
 | agent-shell-openai-default-session-mode-id    | Default Codex session mode ID.                                                  |
 | agent-shell-opencode-acp-command              | Command and parameters for the OpenCode client.                                 |
 | agent-shell-opencode-authentication           | Configuration for OpenCode authentication.                                      |
+| agent-shell-opencode-default-config-options   | Default OpenCode config options, applied at session start.                      |
 | agent-shell-opencode-default-model-id         | Default OpenCode model ID.                                                      |
 | agent-shell-opencode-default-session-mode-id  | Default OpenCode session mode ID.                                               |
 | agent-shell-opencode-environment              | Environment variables for the OpenCode client.                                  |
