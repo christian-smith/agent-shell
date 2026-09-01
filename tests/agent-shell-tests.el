@@ -4612,6 +4612,28 @@ markers."
         (should-not (text-properties-at pos copied))
         (setq pos (1+ pos))))))
 
+(ert-deftest agent-shell-filter-buffer-substring-strips-shell-maker-markers ()
+  "Copying drops shell-maker's markers, invisible on screen.
+A copy spanning a prompt would otherwise carry text the user never saw."
+  (with-temp-buffer
+    (let ((inhibit-read-only t))
+      (insert "Claude> what is 2+2\n")
+      (insert (propertize "<shell-maker-end-of-prompt>"
+                          'shell-maker--marker t
+                          'invisible t 'field 'output 'read-only t))
+      (insert "\n4\n"))
+    (should (equal (agent-shell--filter-buffer-substring (point-min) (point-max))
+                   "Claude> what is 2+2\n\n4\n"))))
+
+(ert-deftest agent-shell-filter-buffer-substring-keeps-marker-shaped-response ()
+  "Copying keys on the marker property, not its text.
+An agent asked about `<shell-maker-end-of-prompt>' writes those very
+characters into its response, and they must survive the copy."
+  (with-temp-buffer
+    (insert "shell-maker writes <shell-maker-end-of-prompt> after input.")
+    (should (equal (agent-shell--filter-buffer-substring (point-min) (point-max))
+                   "shell-maker writes <shell-maker-end-of-prompt> after input."))))
+
 (ert-deftest agent-shell-filter-buffer-substring-strips-block-quote-prefix ()
   "Copying quoted text drops the \"> \" `agent-shell--block-quote' added."
   (with-temp-buffer

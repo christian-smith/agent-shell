@@ -2122,6 +2122,11 @@ system clipboard and isearch kept the raw \"> \".
 place, so the buffer already holds rendered text and there is nothing
 here to strip beyond those properties.
 
+shell-maker's structural markers go as well.  They are invisible on
+screen, so a copy spanning a prompt would otherwise carry
+\"<shell-maker-end-of-prompt>\" and friends into the kill ring, text the
+user never saw.
+
 A collapsed fold indicator is also pointed down, since the body it hides
 is copied along with it.
 
@@ -2129,6 +2134,11 @@ For example, copying a collapsed thought:
 
   \"▶ Thought\\nSo the user wants...\"
   => \"▼ Thought\\nSo the user wants...\"
+
+or copying across a prompt boundary:
+
+  \"ask<shell-maker-end-of-prompt>\\nanswer\"
+  => \"ask\\nanswer\"
 
 START and END may be given in either order, like the stock
 `buffer-substring': a reversed range (START > END, e.g. a right-to-left
@@ -2156,6 +2166,16 @@ mouse selection or a kill where mark > point) is normalized."
                             'indicator)
                     (replace-match "▼" t t)))
                 (buffer-string)))))
+    ;; Drop shell-maker's markers, keyed on the property it tags them with
+    ;; rather than on their text, so a response that merely mentions
+    ;; "<shell-maker-end-of-prompt>" keeps its own words.  This is the same
+    ;; discriminator `shell-maker--find-marker' uses.
+    (when (string-search "<shell-maker-" text)
+      (setq text (replace-regexp-in-string
+                  (rx "<shell-maker-" (+ (any "a-z-")) ">")
+                  (lambda (match)
+                    (if (get-text-property 0 'shell-maker--marker match) "" match))
+                  text nil t)))
     ;; One "> " per line, matching what the block quote inserted, so
     ;; quoting already-quoted text keeps the inner level.
     (substring-no-properties
