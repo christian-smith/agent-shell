@@ -6498,7 +6498,7 @@ why it did neither."
       (user-error (error-message-string error)))))
 
 (ert-deftest agent-shell-prompt-steer-test ()
-  "Test `agent-shell-prompt-steer' refuses when there is no turn to steer."
+  "Test `agent-shell-prompt-steer' guards choose to steer, submit or refuse."
   (should (eq (agent-shell-tests--steer-guard :busy t :supported t :status 'busy)
               'steered))
   ;; An idle agent has no turn to join, so the prompt starts its own.
@@ -6518,14 +6518,15 @@ why it did neither."
   (should (eq (agent-shell-tests--steer-guard :busy t :supported t :status 'blocked
                                               :confirm t)
               'steered))
-  ;; Steering bypasses shell-maker, so a blank prompt would reach the wire.
+  ;; A blank prompt is refused on either path.  Steering bypasses
+  ;; shell-maker entirely, and letting one through when idle would silently
+  ;; reprint the shell prompt rather than say why nothing happened.
   (should (equal (agent-shell-tests--steer-guard :busy t :supported t :status 'busy
                                                  :prompt "  \n ")
-                 "No prompt to steer"))
-  ;; Idle does reach shell-maker, which reprints its prompt for a blank one.
-  (should (eq (agent-shell-tests--steer-guard :busy nil :supported t :status 'ready
-                                              :prompt "  \n ")
-              'submitted)))
+                 "No prompt given"))
+  (should (equal (agent-shell-tests--steer-guard :busy nil :supported t :status 'ready
+                                                 :prompt "  \n ")
+                 "No prompt given")))
 
 (ert-deftest agent-shell-prompt-steer-guards-before-reading-test ()
   "Test `agent-shell-prompt-steer' refuses before asking for a prompt.
