@@ -131,6 +131,8 @@
   (let* ((config (agent-shell-anthropic-make-claude-code-config))
          (meta (map-elt config :session-meta))
          (thinking (map-nested-elt meta '(claudeCode options thinking))))
+    (should (eq (map-elt config :busy-prompt-handler)
+                #'agent-shell-anthropic--handle-busy-prompt))
     ;; Recent Claude models default thinking display to "omitted"; the config
     ;; opts back into visible thinking.
     (should (string= (map-elt thinking 'type) "adaptive"))
@@ -152,6 +154,60 @@
                                     :session-id "s1" :cwd "/tmp" :meta meta)
                                    '(:params _meta))
                    meta))))
+
+(ert-deftest agent-shell-anthropic-busy-prompt-steers-active-turn-test ()
+  "Busy Claude input should use the `_session/steering' extension."
+  (let* ((client 'test-client)
+         (state `((:buffer . ,(current-buffer))
+                  (:client . ,client)
+                  (:session . ((:id . "session-1")))
+                  (:active-requests . (((:method . "session/prompt"))))))
+         request-args
+         fallback-called)
+    (cl-letf (((symbol-function 'agent-shell--build-content-blocks)
+               (lambda (_prompt)
+                 '(((type . "text") (text . "look here")))))
+              ((symbol-function 'acp-send-request)
+               (lambda (&rest args)
+                 (setq request-args args))))
+      (should
+       (agent-shell-anthropic--handle-busy-prompt
+        `((:state . ,state)
+          (:prompt . "look here")
+          (:fallback . ,(lambda ()
+                          (setq fallback-called t))))))
+      (should (eq (plist-get request-args :client) client))
+      (should (equal (map-elt (plist-get request-args :request) :method)
+                     "_session/steering"))
+      (should (equal (map-nested-elt (plist-get request-args :request)
+                                     '(:params sessionId))
+                     "session-1"))
+      (should (equal (map-nested-elt (plist-get request-args :request)
+                                     '(:params prompt))
+                     [((type . "text") (text . "look here"))]))
+      (should (equal (map-nested-elt (plist-get request-args :request)
+                                     '(:params _meta steering idleBehavior))
+                     "promptRequired"))
+      (funcall (plist-get request-args :on-success)
+               '((outcome . "injected")))
+      (should-not fallback-called)
+      (funcall (plist-get request-args :on-success)
+               '((outcome . "startedNewTurn")))
+      (should-not fallback-called)
+      (funcall (plist-get request-args :on-success)
+               '((outcome . "promptRequired")))
+      (should fallback-called))))
+
+(ert-deftest agent-shell-anthropic-busy-prompt-requires-active-turn-test ()
+  "Claude steering should not claim input without an active prompt."
+  (let ((state '((:client . test-client)
+                 (:session . ((:id . "session-1")))
+                 (:active-requests . nil))))
+    (should-not
+     (agent-shell-anthropic--handle-busy-prompt
+      `((:state . ,state)
+        (:prompt . "next turn")
+        (:fallback . ,#'ignore))))))
 
 (provide 'agent-shell-anthropic-tests)
 ;;; agent-shell-anthropic-tests.el ends here
