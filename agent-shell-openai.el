@@ -32,8 +32,11 @@
 
 (declare-function agent-shell--indent-string "agent-shell")
 (declare-function agent-shell--make-acp-client "agent-shell")
+(declare-function agent-shell-codex-app-server-make-client "agent-shell-codex-app-server")
+(declare-function agent-shell-codex-app-server-handle-busy-prompt "agent-shell-codex-app-server")
 (declare-function agent-shell-make-agent-config "agent-shell")
 (autoload 'agent-shell-make-agent-config "agent-shell")
+(autoload 'agent-shell-codex-app-server-make-client "agent-shell-codex-app-server")
 (declare-function agent-shell--dwim "agent-shell")
 
 (cl-defun agent-shell-openai-make-authentication (&key api-key codex-api-key login)
@@ -84,6 +87,20 @@ For Codex API key (function):
 (defcustom agent-shell-openai-codex-acp-command
   '("codex-acp")
   "Command and parameters for the OpenAI Codex client.
+
+The first element is the command name, and the rest are command parameters."
+  :type '(repeat string)
+  :group 'agent-shell)
+
+(defcustom agent-shell-openai-codex-transport 'acp
+  "Transport used for the OpenAI Codex integration."
+  :type '(choice (const :tag "ACP" acp)
+                 (const :tag "App Server" app-server))
+  :group 'agent-shell)
+
+(defcustom agent-shell-openai-codex-app-server-command
+  '("codex" "app-server")
+  "Command and parameters for the OpenAI Codex app-server client.
 
 The first element is the command name, and the rest are command parameters."
   :type '(repeat string)
@@ -148,6 +165,27 @@ authenticate request shape (see its \"DEFAULT_AUTH_REQUEST\")."
          (json-serialize
           '((methodId . "chat-gpt"))))))
 
+(defun agent-shell-openai--codex-app-server-environment ()
+  "Return environment variables for the Codex app-server transport."
+  (cond
+   ((map-elt agent-shell-openai-authentication :api-key)
+    (let ((api-key (agent-shell-openai-key)))
+      (unless api-key
+        (user-error "Please set your `agent-shell-openai-authentication'"))
+      (append (list (format "OPENAI_API_KEY=%s" api-key))
+              agent-shell-openai-codex-environment)))
+   ((map-elt agent-shell-openai-authentication :codex-api-key)
+    (let ((codex-key (agent-shell-openai-key)))
+      (unless codex-key
+        (user-error "Please set your `agent-shell-openai-authentication'"))
+      (append (list (format "CODEX_API_KEY=%s" codex-key))
+              agent-shell-openai-codex-environment)))
+   ((map-elt agent-shell-openai-authentication :login)
+    (append '("OPENAI_API_KEY=" "CODEX_API_KEY=")
+            agent-shell-openai-codex-environment))
+   (t
+    (error "Invalid authentication configuration"))))
+
 (defun agent-shell-openai-make-codex-config ()
   "Create a Codex agent configuration.
 
@@ -169,15 +207,24 @@ Returns an agent configuration alist using `agent-shell-make-agent-config'."
                                     (funcall agent-shell-openai-default-model-id)
                                   agent-shell-openai-default-model-id))
    :default-session-mode-id (lambda () agent-shell-openai-default-session-mode-id)
+   :busy-prompt-handler (when (eq agent-shell-openai-codex-transport 'app-server)
+                          #'agent-shell-codex-app-server-handle-busy-prompt)
    :client-maker (lambda (buffer)
                    (agent-shell-openai-make-codex-client :buffer buffer))
-   :install-instructions "See https://github.com/agentclientprotocol/codex-acp for installation."))
+   :install-instructions (if (eq agent-shell-openai-codex-transport 'app-server)
+                             "Install Codex CLI and ensure `codex app-server` is available."
+                           "See https://github.com/agentclientprotocol/codex-acp for installation.")))
 
 (defun agent-shell-openai-start-codex ()
   "Start an interactive Codex agent shell."
   (interactive)
-  (agent-shell--dwim :config (agent-shell-openai-make-codex-config)
-                     :new-shell t))
+  (let ((mark-active (if (and (eq agent-shell-openai-codex-transport 'app-server)
+                              (region-active-p)
+                              (equal (point) (mark t)))
+                         nil
+                       mark-active)))
+    (agent-shell--dwim :config (agent-shell-openai-make-codex-config)
+                       :new-shell t)))
 
 (cl-defun agent-shell-openai-make-codex-client (&key buffer)
   "Create a Codex client using configured authentication with BUFFER as context.
@@ -188,6 +235,14 @@ Uses `agent-shell-openai-authentication' for authentication configuration."
   (when (and (boundp 'agent-shell-openai-codex-command) agent-shell-openai-codex-command)
     (user-error "Please migrate to use agent-shell-openai-codex-acp-command and eval (setq agent-shell-openai-codex-command nil)"))
   (cond
+   ((eq agent-shell-openai-codex-transport 'app-server)
+    (agent-shell-codex-app-server-make-client
+     :command (car agent-shell-openai-codex-app-server-command)
+     :command-params (cdr agent-shell-openai-codex-app-server-command)
+     :environment-variables (agent-shell-openai--codex-app-server-environment)
+     :context-buffer buffer))
+   ((not (eq agent-shell-openai-codex-transport 'acp))
+    (error "Unsupported Codex transport: %s" agent-shell-openai-codex-transport))
    ((map-elt agent-shell-openai-authentication :api-key)
     (let ((api-key (agent-shell-openai-key)))
       (unless api-key
