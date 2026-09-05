@@ -133,6 +133,10 @@ Optionally: You may also need [[https://code.claude.com/docs/en/overview][Claude
 
 For OpenAI's Codex, install [[https://github.com/agentclientprotocol/codex-acp][@agentclientprotocol/codex-acp]] (=npm install -g @agentclientprotocol/codex-acp=) and ensure the =codex-acp= executable is in PATH.
 
+Alternatively, install the [[https://developers.openai.com/codex/cli/][Codex CLI]] and use its native app-server transport. Set =(setq agent-shell-openai-codex-transport 'app-server)= before starting Codex. The default remains =acp=.
+
+Codex can ask asynchronous questions while continuing its work. These appear in a separate question buffer without taking focus. Select =Answer= to choose suggested answers or enter your own text. Answers use the prompt queue: they steer a running turn or start a new turn when Codex is idle. Dismissing a question does not interrupt Codex.
+
 *** Gemini CLI
 
 For Google's [[https://github.com/google-gemini/gemini-cli][Gemini CLI]], be sure to get a recent release supporting the =--experimental-acp= flag.
@@ -157,6 +161,10 @@ Optional flags (set via =agent-shell-xai-acp-command=):
 grok agent -m grok-build stdio
 grok agent --always-approve stdio
 #+end_src
+
+Per-session always-approve or auto permission mode can also be set with =agent-shell-xai-yolo-mode= and =agent-shell-xai-auto-mode= (sent as =session/new= =_meta=). Session modes are =default=, =plan=, and =ask=. Set =agent-shell-text-file-capabilities= to nil to make Grok use its own filesystem instead of loading files into Emacs buffers.
+
+Reasoning effort uses Grok's native =reasoning_effort= config option and requires a build that advertises it. Mid-turn messages use the =_x.ai/interject= ACP extension; Grok queues them for the next safe point in its running turn.
 
 See also the [[https://zed.dev/acp/agent/grok-build][Zed ACP registry listing]] for Grok Build.
 
@@ -1089,7 +1097,9 @@ always go to Evil modes if you need to with ~C-z~).
 | agent-shell-omp-environment                   | Environment variables for the Oh My Pi (omp) client.                            |
 | agent-shell-openai-authentication             | Configuration for OpenAI authentication.                                        |
 | agent-shell-openai-codex-acp-command          | Command and parameters for the OpenAI Codex client.                             |
+| agent-shell-openai-codex-app-server-command   | Command and parameters for the OpenAI Codex app-server client.                  |
 | agent-shell-openai-codex-environment          | Environment variables for the OpenAI Codex client.                              |
+| agent-shell-openai-codex-transport            | Transport used for the OpenAI Codex integration.                                |
 | agent-shell-openai-default-model-id           | Default Codex model ID.                                                         |
 | agent-shell-openai-default-session-mode-id    | Default Codex session mode ID.                                                  |
 | agent-shell-opencode-acp-command              | Command and parameters for the OpenCode client.                                 |
@@ -1125,16 +1135,19 @@ always go to Evil modes if you need to with ~C-z~).
 | agent-shell-text-file-capabilities            | Whether agents are initialized with read/write text file capabilities.          |
 | agent-shell-thought-process-expand-by-default | Whether thought process sections should be expanded by default.                 |
 | agent-shell-thought-process-icon              | Icon displayed during the AI’s thought process.                                 |
-| agent-shell-tool-use-expand-by-default        | Whether tool use sections should be expanded by default.                        |
+| agent-shell-tool-use-expand-by-default        | Boolean or predicate controlling which tool use sections expand by default.     |
+| agent-shell-tool-use-minimum-visible-seconds  | Minimum seconds an automatically expanded tool remains visible.                |
 | agent-shell-transcript-file-path-function     | Function to generate the full transcript file path.                             |
 | agent-shell-ui-mode-hook                      | Hook run after entering or leaving ‘agent-shell-ui-mode’.                       |
-| agent-shell-user-message-expand-by-default    | Whether user message sections should be expanded by default.                    |
-| agent-shell-viewport-dismiss-on-send          | Non-nil dismisses the viewport compose window after sending.                    |
-| agent-shell-write-inhibit-minor-modes         | List of minor mode commands to inhibit during ‘fs/write_text_file’ edits.       |
-| agent-shell-xai-acp-command                   | Command and parameters for the Grok Build ACP client.                           |
-| agent-shell-xai-default-model-id              | Default Grok Build model ID.                                                    |
+ | agent-shell-user-message-expand-by-default    | Whether user message sections should be expanded by default.                    |
+ | agent-shell-viewport-dismiss-on-send          | Non-nil dismisses the viewport compose window after sending.                    |
+ | agent-shell-write-inhibit-minor-modes         | List of minor mode commands to inhibit during ‘fs/write_text_file’ edits.       |
+ | agent-shell-xai-acp-command                   | Command and parameters for the Grok Build (xAI) ACP client.                     |
+ | agent-shell-xai-auto-mode                     | When non-nil, start Grok sessions in auto permission mode.                      |
+ | agent-shell-xai-default-model-id              | Default Grok Build model ID.                                                    |
 | agent-shell-xai-default-session-mode-id       | Default Grok Build session mode ID.                                             |
 | agent-shell-xai-environment                   | Environment variables for the Grok Build ACP client.                            |
+| agent-shell-xai-yolo-mode                     | When non-nil, start Grok sessions in always-approve mode.                       |
 
 * Commands
 #+BEGIN_SRC emacs-lisp :results table :colnames '("Binding" "Command" "Description") :exports results
@@ -1259,7 +1272,7 @@ always go to Evil modes if you need to with ~C-z~).
 |                                                       | agent-shell-prompt-bar-mode                             | Toggle an in-frame prompt bar glued below every `agent-shell' window.         |
 |                                                       | agent-shell-prompt-bar-submit                           | Submit the bar's prompt to its shell, or queue it when busy.                  |
 |                                                       | agent-shell-prompt-compose                              | Compose an `agent-shell' prompt in a dedicated buffer.                        |
-|                                                       | agent-shell-prompt-queue                                | Queue or immediately send a prompt depending on shell busy state.             |
+| C-c /           | agent-shell-prompt-queue                                | Queue or immediately send a prompt depending on shell busy state.             |
 |                                                       | agent-shell-prompt-queue-remove                         | Remove all pending prompts or a specific prompt by REMOVE-INDEX.              |
 |                                                       | agent-shell-prompt-queue-resume                         | Resume processing pending prompts in the queue.                               |
 |                                                       | agent-shell-prompt-steer                                | Steer PROMPT into the turn the agent is currently running.                    |
