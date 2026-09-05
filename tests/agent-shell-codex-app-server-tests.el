@@ -1872,7 +1872,15 @@ Sending them as empty strings would fail the server's typed schema."
                                                ((reasoningEffort . "medium")
                                                 (description . "Balanced"))
                                                ((reasoningEffort . "xhigh")
-                                                (description . "Deepest"))))
+                                                (description . "Deepest"))
+                                               ((reasoningEffort . "max")
+                                                (description . "Maximum"))
+                                               ((reasoningEffort . "ultra")
+                                                (description . "Ultra"))
+                                               ((reasoningEffort . "persistent")
+                                                (description . "Persistent"))
+                                               ((reasoningEffort . "custom-effort")
+                                                (description . "Model-defined"))))
                  (defaultReasoningEffort . "medium")
                  (isDefault . t))))
     (let ((response
@@ -1885,10 +1893,13 @@ Sending them as empty strings would fail the server's typed schema."
                      "reasoning:xhigh"))
       (should (equal (mapcar (lambda (mode) (map-elt mode 'id))
                              (map-nested-elt response '(modes availableModes)))
-                     '("reasoning:low" "reasoning:medium" "reasoning:xhigh")))
+                     '("reasoning:low" "reasoning:medium" "reasoning:xhigh"
+                       "reasoning:max" "reasoning:ultra" "reasoning:persistent"
+                       "reasoning:custom-effort")))
       (should (equal (mapcar (lambda (mode) (map-elt mode 'name))
                              (map-nested-elt response '(modes availableModes)))
-                     '("Low" "Medium" "XHigh"))))))
+                     '("Low" "Medium" "XHigh" "Max" "Ultra" "Persistent"
+                       "Custom-Effort"))))))
 
 (ert-deftest agent-shell-codex-app-server-session-set-mode-updates-reasoning-effort ()
   "Session mode changes should persist the reasoning effort with app-server."

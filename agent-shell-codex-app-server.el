@@ -42,10 +42,6 @@
 Keep this distinct from first-party Codex clients so app-server usage
 and compliance logs identify Agent Shell separately.")
 
-(defconst agent-shell-codex-app-server--reasoning-effort-order
-  '("none" "minimal" "low" "medium" "high" "xhigh")
-  "Preferred display order for Codex reasoning efforts.")
-
 (defvar agent-shell--state)
 (defvar agent-shell--version)
 (defvar agent-shell-codex-app-server--instance-count 0)
@@ -1006,7 +1002,14 @@ Use MODEL-ID and EFFORT to resolve the current mode."
                                  supported-effort))
                        (description . ,(agent-shell-codex-app-server--reasoning-mode-description
                                         client supported-effort)))))
-                 agent-shell-codex-app-server--reasoning-effort-order))))
+                 (seq-uniq
+                  (seq-mapcat
+                   (lambda (model)
+                     (mapcar (lambda (option)
+                               (map-elt option 'reasoningEffort))
+                             (append (map-elt model 'supportedReasoningEfforts)
+                                     nil)))
+                   (map-elt client :available-models)))))))
     `((currentModeId . ,(agent-shell-codex-app-server--reasoning-mode-id
                          current-effort))
       (availableModes . ,(or available-modes
