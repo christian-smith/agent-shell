@@ -27,9 +27,11 @@
 
 (eval-when-compile
   (require 'cl-lib))
+(require 'seq)
 (require 'shell-maker)
 (require 'acp)
 
+(declare-function agent-shell--build-content-blocks "agent-shell")
 (declare-function agent-shell--indent-string "agent-shell")
 (declare-function agent-shell--make-acp-client "agent-shell")
 (declare-function agent-shell-make-agent-config "agent-shell")
@@ -149,6 +151,7 @@ Returns an agent configuration alist using `agent-shell-make-agent-config'."
                                     (funcall agent-shell-anthropic-default-model-id)
                                   agent-shell-anthropic-default-model-id))
    :default-session-mode-id (lambda () agent-shell-anthropic-default-session-mode-id)
+   :busy-prompt-handler #'agent-shell-anthropic--handle-busy-prompt
    ;; Recent Claude models default `thinking.display' to "omitted", which
    ;; streams signature-only thinking blocks with no visible text.  Request
    ;; "summarized" so thinking is shown.  This is orthogonal to the effort /
@@ -159,6 +162,42 @@ Returns an agent configuration alist using `agent-shell-make-agent-config'."
                             . ((type . "adaptive")
                                (display . "summarized"))))))))
    :install-instructions "See https://github.com/agentclientprotocol/claude-agent-acp for installation."))
+
+(defun agent-shell-anthropic--active-prompt-p (state)
+  "Return non-nil when STATE has a Claude `session/prompt' in flight."
+  (seq-find (lambda (request)
+              (equal (map-elt request :method) "session/prompt"))
+            (map-elt state :active-requests)))
+
+(defun agent-shell-anthropic--handle-busy-prompt (event)
+  "Send busy-prompt EVENT to Claude as active-turn steering."
+  (when-let* ((state (map-elt event :state))
+              ((agent-shell-anthropic--active-prompt-p state))
+              (client (map-elt state :client))
+              (session-id (map-nested-elt state '(:session :id)))
+              (prompt (map-elt event :prompt))
+              (fallback (map-elt event :fallback)))
+    (condition-case nil
+        (progn
+          (acp-send-request
+           :client client
+           :request `((:method . "_session/steering")
+                      (:params . ((sessionId . ,session-id)
+                                  (prompt . ,(vconcat
+                                              (agent-shell--build-content-blocks
+                                               prompt)))
+                                  (_meta . ((steering
+                                             . ((idleBehavior
+                                                 . "promptRequired"))))))))
+           :buffer (map-elt state :buffer)
+           :on-success (lambda (result)
+                         (when (equal (map-elt result 'outcome)
+                                      "promptRequired")
+                           (funcall fallback)))
+           :on-failure (lambda (&rest _)
+                         (funcall fallback)))
+          t)
+      (error nil))))
 
 (defun agent-shell-anthropic-start-claude-code ()
   "Start an interactive Claude Agent shell."
