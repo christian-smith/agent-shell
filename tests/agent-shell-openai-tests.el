@@ -65,5 +65,93 @@
     (should (string= (map-nested-elt request '(_meta api-key apiKey))
                      "codex-secret"))))
 
+(ert-deftest agent-shell-openai-codex-acp-client-keeps-default-auth-request-test ()
+  "Test that the ACP client retains deferred authentication metadata."
+  (let ((agent-shell-openai-authentication
+         (agent-shell-openai-make-authentication :login t))
+        (agent-shell-openai-codex-transport 'acp)
+        client-args)
+    (cl-letf (((symbol-function 'agent-shell--make-acp-client)
+               (lambda (&rest args)
+                 (setq client-args args))))
+      (agent-shell-openai-make-codex-client :buffer (current-buffer)))
+    (should (member "OPENAI_API_KEY="
+                    (plist-get client-args :environment-variables)))
+    (should (seq-some
+             (lambda (entry)
+               (string-prefix-p "DEFAULT_AUTH_REQUEST=" entry))
+             (plist-get client-args :environment-variables)))))
+
+(ert-deftest agent-shell-openai-codex-app-server-client-test ()
+  "Test that app-server transport creates the native client."
+  (let ((agent-shell-openai-authentication
+         (agent-shell-openai-make-authentication :login t))
+        (agent-shell-openai-codex-transport 'app-server)
+        client-args)
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server-make-client)
+               (lambda (&rest args)
+                 (setq client-args args))))
+      (agent-shell-openai-make-codex-client :buffer (current-buffer)))
+    (should (equal (plist-get client-args :command) "codex"))
+    (should (equal (plist-get client-args :command-params) '("app-server")))
+    (should (eq (plist-get client-args :context-buffer) (current-buffer)))))
+
+(ert-deftest agent-shell-openai-app-server-config-enables-busy-input-test ()
+  "Test that app-server Codex config enables active-turn steering."
+  (let ((agent-shell-openai-codex-transport 'app-server))
+    (should (eq (map-elt (agent-shell-openai-make-codex-config)
+                         :busy-prompt-handler)
+                #'agent-shell-codex-app-server-handle-busy-prompt))))
+
+(ert-deftest agent-shell-openai-acp-config-keeps-busy-input-queued-test ()
+  "Test that ACP Codex config retains the normal next-turn queue."
+  (let ((agent-shell-openai-codex-transport 'acp))
+    (should-not (map-elt (agent-shell-openai-make-codex-config)
+                         :busy-prompt-handler))))
+
+(ert-deftest agent-shell-openai-app-server-start-ignores-empty-region-test ()
+  "Test that app-server startup does not capture an empty active region."
+  (let ((agent-shell-openai-codex-transport 'app-server)
+        region-active-during-start)
+    (with-temp-buffer
+      (insert "first\nsecond\n")
+      (goto-char (line-beginning-position 2))
+      (set-mark (point))
+      (activate-mark)
+      (cl-letf (((symbol-function 'agent-shell--dwim)
+                 (lambda (&rest _args)
+                   (setq region-active-during-start (region-active-p)))))
+        (agent-shell-openai-start-codex))
+      (should-not region-active-during-start)
+      (should (region-active-p)))))
+
+(ert-deftest agent-shell-openai-app-server-start-keeps-selected-region-test ()
+  "Test that app-server startup preserves a non-empty selected region."
+  (let ((agent-shell-openai-codex-transport 'app-server)
+        region-active-during-start)
+    (with-temp-buffer
+      (insert "selected")
+      (set-mark (point-min))
+      (activate-mark)
+      (cl-letf (((symbol-function 'agent-shell--dwim)
+                 (lambda (&rest _args)
+                   (setq region-active-during-start (region-active-p)))))
+        (agent-shell-openai-start-codex))
+      (should region-active-during-start))))
+
+(ert-deftest agent-shell-openai-acp-start-keeps-empty-region-test ()
+  "Test that ACP startup retains its existing empty-region behavior."
+  (let ((agent-shell-openai-codex-transport 'acp)
+        region-active-during-start)
+    (with-temp-buffer
+      (insert "text")
+      (set-mark (point))
+      (activate-mark)
+      (cl-letf (((symbol-function 'agent-shell--dwim)
+                 (lambda (&rest _args)
+                   (setq region-active-during-start (region-active-p)))))
+        (agent-shell-openai-start-codex))
+      (should region-active-during-start))))
+
 (provide 'agent-shell-openai-tests)
 ;;; agent-shell-openai-tests.el ends here
