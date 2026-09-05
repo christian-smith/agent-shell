@@ -476,6 +476,65 @@ caller stamping ranges leaves it unmarked, stranding navigation there)."
        :namespace-id "ns" :block-id "leaf" :collapsed t)
       (should-not (child-hidden-p)))))
 
+(ert-deftest agent-shell-ui-group-collapse-keeps-following-window-at-end-test ()
+  "Collapsing the visible activity keeps a following window bottom-aligned."
+  (let* ((buffer (generate-new-buffer " *agent-shell-fold-scroll-test*"))
+         (window (selected-window))
+         (original-buffer (window-buffer window))
+         (original-start (window-start window))
+         (original-get-buffer-window-list
+          (symbol-function 'get-buffer-window-list))
+         queried-all-frames)
+    (unwind-protect
+        (progn
+          (set-window-buffer window buffer)
+          (with-current-buffer buffer
+            (agent-shell-ui-mode 1)
+            (insert (mapconcat (lambda (n) (format "before %d" n))
+                               (number-sequence 1 80) "\n")
+                    "\n")
+            (agent-shell-ui-update-fragment
+             (agent-shell-ui-make-fragment-model
+              :namespace-id "ns" :block-id "member"
+              :group-id "group" :group-label "Activity"
+              :label-left "run" :label-right "tool"
+              :body (mapconcat (lambda (n) (format "child %d" n))
+                               (number-sequence 1 80) "\n"))
+             :expanded t :navigation 'always)
+            (let ((inhibit-read-only t))
+              (goto-char (point-max))
+              (insert "\nPrompt\n"))
+            (goto-char (point-max)))
+          (set-window-point window (with-current-buffer buffer (point-max)))
+          (with-selected-window window
+            (goto-char (point-max))
+            (recenter -1))
+          (redisplay t)
+          (with-current-buffer buffer
+            (should (get-text-property (window-start window)
+                                       'agent-shell-ui-state))
+            (let ((header-start
+                   (map-elt (agent-shell-ui--group-header-range "ns-group")
+                            :start)))
+              (cl-letf (((symbol-function 'get-buffer-window-list)
+                         (lambda (&optional buffer-or-name minibuf all-frames)
+                           (setq queried-all-frames all-frames)
+                           (funcall original-get-buffer-window-list
+                                    buffer-or-name minibuf all-frames))))
+                (agent-shell-ui-set-group-collapsed-by-id
+                 :namespace-id "ns" :block-id "group" :collapsed t :no-undo t))
+              (redisplay t)
+              (should queried-all-frames)
+              (should-not (get-text-property (window-start window) 'invisible))
+              (should (< (window-start window) header-start))
+              (should (>= (window-end window t) (1- (point-max)))))))
+      (when (window-live-p window)
+        (set-window-buffer window original-buffer)
+        (when (buffer-live-p original-buffer)
+          (set-window-start window original-start t)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest agent-shell-ui-group-child-streams-body-stays-nested-test ()
   "A labels-only child that later gains a body stays nested and indented."
   (with-temp-buffer

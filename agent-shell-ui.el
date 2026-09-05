@@ -1356,7 +1356,9 @@ Unlike `agent-shell-ui-collapse-fragment-by-id', this sets the fold state
 rather than toggling it, so repeat calls with the same COLLAPSED are a
 no-op.  Does nothing when NAMESPACE-ID/BLOCK-ID names no rendered group
 header, or when it already matches COLLAPSED.  When NO-UNDO is non-nil,
-disable undo recording for this operation.
+disable undo recording for this operation.  If collapsing hides a
+displayed window's start, keep a window following output bottom-aligned
+and place any other window at the group header.
 
   ;; Group \"ns-grp\" is expanded.
   (agent-shell-ui-set-group-collapsed-by-id
@@ -1365,14 +1367,45 @@ disable undo recording for this operation.
   (save-mark-and-excursion
     (let ((inhibit-read-only t)
           (buffer-undo-list (if no-undo t buffer-undo-list))
-          (qualified-id (format "%s-%s" namespace-id block-id)))
+          (qualified-id (format "%s-%s" namespace-id block-id))
+          (window-states
+           (when collapsed
+             (seq-map
+              (lambda (window)
+                (list (cons :window window)
+                      (cons :start (window-start window))
+                      (cons :following-end
+                            (or (pos-visible-in-window-p (point-max) window)
+                                (and (> (point-max) (point-min))
+                                     (pos-visible-in-window-p
+                                      (1- (point-max)) window))
+                                (>= (window-end window t)
+                                    (max (point-min) (1- (point-max))))))))
+              (get-buffer-window-list nil 'no-mini t)))))
       (when-let* ((header (agent-shell-ui--group-header-range qualified-id))
                   (state (get-text-property (map-elt header :start)
                                             'agent-shell-ui-state))
                   ((eq (map-elt state :kind) 'group))
                   ((not (eq (and (map-elt state :collapsed) t)
                             (and collapsed t)))))
-        (agent-shell-ui--set-group-collapsed qualified-id (and collapsed t))))))
+        (agent-shell-ui--set-group-collapsed qualified-id (and collapsed t))
+        (dolist (window-state window-states)
+          (when-let* ((window (map-elt window-state :window))
+                      ((window-live-p window))
+                      ((eq (window-buffer window) (current-buffer)))
+                      (start (map-elt window-state :start))
+                      ((get-text-property start 'invisible)))
+            (if (map-elt window-state :following-end)
+                (set-window-start
+                 window
+                 (save-mark-and-excursion
+                   (goto-char (point-max))
+                   (vertical-motion (- 1 (window-body-height window)) window)
+                   (point))
+                 t)
+              (set-window-start window (map-elt header :start) t)
+              (when (get-text-property (window-point window) 'invisible)
+                (set-window-point window (map-elt header :start))))))))))
 
 (defvar-local agent-shell-ui--fold-toggle-state nil
   "Current global fold state for the buffer.

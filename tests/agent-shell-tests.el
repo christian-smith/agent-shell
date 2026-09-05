@@ -1164,6 +1164,74 @@ the window.  An empty draft signals an error."
         (should-error (agent-shell-viewport-compose-send-and-dismiss))
         (should-not queued)))))
 
+(ert-deftest agent-shell--prompt-queue-handle-busy-claims-prompt-test ()
+  "A per-agent busy handler should claim input without queueing it."
+  (let (received-event echoed)
+    (let ((agent-shell--state
+           `((:agent-config
+              . ((:busy-prompt-handler
+                  . ,(lambda (event)
+                       (setq received-event event)
+                       t)))))))
+      (cl-letf (((symbol-function 'agent-shell--echo)
+                 (lambda (&rest args)
+                   (setq echoed args))))
+        (should (agent-shell--prompt-queue-handle-busy "steer left"))
+        (should (equal (map-elt received-event :prompt) "steer left"))
+        (should (eq (map-elt received-event :state) agent-shell--state))
+        (should (functionp (map-elt received-event :fallback)))
+        (should (equal echoed '("Sent to active turn")))))))
+
+(ert-deftest agent-shell--prompt-queue-handle-busy-falls-back-once-test ()
+  "A failed asynchronous busy handler should queue its prompt once."
+  (let (fallback queued)
+    (let ((agent-shell--state
+           `((:agent-config
+              . ((:busy-prompt-handler
+                  . ,(lambda (event)
+                       (setq fallback (map-elt event :fallback))
+                       t)))))))
+      (cl-letf (((symbol-function 'agent-shell--echo) #'ignore)
+                ((symbol-function 'agent-shell--prompt-queue-enqueue)
+                 (lambda (&rest args)
+                   (push (plist-get args :prompt) queued))))
+        (should (agent-shell--prompt-queue-handle-busy "preserve me"))
+        (funcall fallback)
+        (funcall fallback)
+        (should (equal queued '("preserve me")))))))
+
+(ert-deftest agent-shell--prompt-queue-setup-yasnippet-test ()
+  "Queued prompts inherit the source shell's Yasnippet tables."
+  (let ((shell (generate-new-buffer " *agent-shell-yasnippet-test*"))
+        enabled)
+    (unwind-protect
+        (progn
+          (with-current-buffer shell
+            (setq-local major-mode 'agent-shell-mode)
+            (setq-local yas-extra-modes '(text-mode)))
+          (with-temp-buffer
+            (setq-local yas-extra-modes '(minibuffer-mode))
+            (cl-letf (((symbol-function 'yas-minor-mode)
+                       (lambda (arg)
+                         (setq enabled arg))))
+              (agent-shell--prompt-queue-setup-yasnippet
+               `((:shell-buffer . ,shell))))
+            (should (= 1 enabled))
+            (should (equal '(agent-shell-mode text-mode minibuffer-mode)
+                           yas-extra-modes))))
+      (kill-buffer shell))))
+
+(ert-deftest agent-shell--prompt-queue-setup-newline-test ()
+  "Shift-Return inserts a newline only in the queued-prompt minibuffer."
+  (let ((shared-map (make-sparse-keymap)))
+    (with-temp-buffer
+      (use-local-map shared-map)
+      (agent-shell--prompt-queue-setup-newline nil)
+      (should (eq #'newline
+                  (lookup-key (current-local-map) (kbd "S-<return>"))))
+      (should-not (eq shared-map (current-local-map))))
+    (should-not (lookup-key shared-map (kbd "S-<return>")))))
+
 (ert-deftest agent-shell--format-diff-as-text-test ()
   "Test `agent-shell--format-diff-as-text' function."
   ;; Test nil input
@@ -4134,6 +4202,46 @@ other unknown ones."
                          "Method not found: unknown/method")))
         (should-not (map-elt state :last-entry-type))))))
 
+(ert-deftest agent-shell--on-request-dispatches-agent-request-handler-test ()
+  "Test `agent-shell--on-request' calls the agent config request handler."
+  (let* ((handled nil)
+         (state `((:client . test-client)
+                  (:agent-config
+                   . ((:request-handler
+                       . ,(lambda (&rest args)
+                            (setq handled args)
+                            t)))))))
+    (cl-letf (((symbol-function 'agent-shell--update-fragment)
+               (lambda (&rest _)
+                 (error "Should not render unhandled request")))
+              ((symbol-function 'acp-send-response)
+               (lambda (&rest _)
+                 (error "Should not send method-not-found"))))
+      (agent-shell--on-request
+       :state state
+       :acp-request '((id . "req-1")
+                      (method . "x.ai/ask_user_question")))
+      (should handled)
+      (should (eq (plist-get handled :state) state))
+      (should (equal (map-elt (plist-get handled :acp-request) 'method)
+                     "x.ai/ask_user_question")))))
+
+(ert-deftest agent-shell--session-from-response-uses-adapter-test ()
+  "Test `agent-shell--session-from-response' applies session-response-adapter."
+  (let ((agent-shell--state
+         `((:agent-config
+            . ((:session-response-adapter
+                . ,(lambda (&key acp-response)
+                     (append '((modes (currentModeId . "plan")
+                                      (availableModes . (((id . "plan")
+                                                          (name . "Plan"))))))
+                              acp-response))))))))
+    (let ((session (agent-shell--session-from-response
+                    :acp-response '((sessionId . "s1"))
+                    :acp-session-id "s1")))
+      (should (equal (map-elt session :mode-id) "plan"))
+      (should (equal (map-elt (car (map-elt session :modes)) :id) "plan")))))
+
 ;;; Tests for agent-shell-show-context-usage-indicator
 
 (ert-deftest agent-shell--context-usage-indicator-bar-test ()
@@ -5523,6 +5631,109 @@ in flight shows its members."
       (agent-shell--collapse-expanded-activity-group state)
       (should (equal '("activity-2" "activity-1") collapsed)))))
 
+(ert-deftest agent-shell--tool-use-expanded-p-test ()
+  "Tool expansion supports booleans and a per-tool predicate."
+  (let ((tool-call '((:kind . "edit"))))
+    (let ((agent-shell-tool-use-expand-by-default nil))
+      (should-not (agent-shell--tool-use-expanded-p tool-call)))
+    (let ((agent-shell-tool-use-expand-by-default t))
+      (should (agent-shell--tool-use-expanded-p tool-call)))
+    (let ((agent-shell-tool-use-expand-by-default
+           (lambda (candidate)
+             (equal (map-elt candidate :kind) "edit"))))
+      (should (agent-shell--tool-use-expanded-p tool-call))
+      (should-not
+       (agent-shell--tool-use-expanded-p '((:kind . "read")))))))
+
+(ert-deftest agent-shell--note-tool-use-expansion-records-deadline-test ()
+  "Automatically expanded tools record their activity visibility deadline."
+  (let ((agent-shell-activity-group-expand-by-default 'latest)
+        (agent-shell-tool-use-expand-by-default
+         (lambda (tool-call)
+           (equal (map-elt tool-call :kind) "edit")))
+        (agent-shell-tool-use-minimum-visible-seconds 5)
+        (state (list (cons :activity-group-expansion-deadlines nil))))
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 100)))
+      (should (agent-shell--note-tool-use-expansion
+               state "activity-1" '((:kind . "edit"))))
+      (should (= 105 (map-nested-elt
+                      state
+                      '(:activity-group-expansion-deadlines "activity-1"))))
+      (should-not (agent-shell--note-tool-use-expansion
+                   state "activity-1" '((:kind . "read")))))))
+
+(ert-deftest agent-shell--activity-group-collapse-waits-for-expanded-tool-test ()
+  "An auto-expanded tool delays folding, including reactivation races."
+  (let* ((now 100)
+         (group '((:namespace-id . 3) (:group-id . "activity-1")))
+         (state (list (cons :buffer (current-buffer))
+                      (cons :expanded-activity-group group)
+                      (cons :activity-group-expansion-deadlines
+                            '(("activity-1" . 105)))))
+         scheduled
+         collapsed)
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now))
+              ((symbol-function 'run-at-time)
+               (lambda (delay _repeat function &rest args)
+                 (setq scheduled (list :delay delay
+                                       :function function
+                                       :args args))))
+              ((symbol-function 'agent-shell--collapse-fragment-group)
+               (lambda (&rest args)
+                 (push (cons (plist-get args :namespace-id)
+                             (plist-get args :block-id))
+                       collapsed))))
+      (agent-shell--collapse-expanded-activity-group state)
+      (should-not collapsed)
+      (should (= 5 (plist-get scheduled :delay)))
+      (should-not (map-elt state :expanded-activity-group))
+      ;; The same group can become active again before the old timer runs.
+      (map-put! state :expanded-activity-group group)
+      (setq now 105)
+      (apply (plist-get scheduled :function) (plist-get scheduled :args))
+      (should-not collapsed)
+      ;; Leaving the reactivated group after its deadline folds immediately.
+      (agent-shell--collapse-expanded-activity-group state)
+      (should (equal '((3 . "activity-1")) collapsed))
+      (should-not (map-elt state :activity-group-expansion-deadlines)))))
+
+(ert-deftest agent-shell--tool-use-predicate-controls-fragments-test ()
+  "Tool call notifications apply the expansion predicate to each tool."
+  (let ((expanded '())
+        (agent-shell-tool-use-expand-by-default
+         (lambda (tool-call)
+           (equal (map-elt tool-call :kind) "edit")))
+        (state (agent-shell--make-state)))
+    (map-put! state :active-requests t)
+    (cl-letf (((symbol-function 'agent-shell--update-fragment)
+               (lambda (&rest args)
+                 (push (cons (plist-get args :block-id)
+                             (plist-get args :expanded))
+                       expanded)))
+              ((symbol-function 'agent-shell--refresh-activity-group-header) #'ignore)
+              ((symbol-function 'agent-shell--sync-activity-group-fold) #'ignore)
+              ((symbol-function 'agent-shell--append-transcript) #'ignore)
+              ((symbol-function 'agent-shell--make-transcript-tool-call-entry)
+               (lambda (&rest _) ""))
+              ((symbol-function 'agent-shell--delete-fragment) #'ignore)
+              ((symbol-function 'agent-shell--cancel-idle-timer) #'ignore)
+              ((symbol-function 'agent-shell--emit-event) #'ignore)
+              ((symbol-function 'agent-shell-make-tool-call-label)
+               (lambda (&rest _) '((:status . "s") (:title . "t")))))
+      (cl-flet ((notify (update)
+                  (agent-shell--on-notification
+                   :state state
+                   :acp-notification `((method . "session/update")
+                                       (params (update . ,update))))))
+        (notify '((sessionUpdate . "tool_call") (toolCallId . "edit")
+                  (title . "Edit") (kind . "edit") (status . "pending")))
+        (notify '((sessionUpdate . "tool_call_update") (toolCallId . "edit")
+                  (status . "in_progress")))
+        (notify '((sessionUpdate . "tool_call") (toolCallId . "read")
+                  (title . "Read") (kind . "read") (status . "pending")))))
+    (should (equal '(("edit" . t) ("edit" . t) ("read"))
+                   (nreverse expanded)))))
+
 (ert-deftest agent-shell--activity-grouping-late-update-starts-new-group-test ()
   "A message between a tool call and the next starts a fresh group.
 Regression for xenodium/agent-shell-js#31: a late in-place completion
@@ -5867,6 +6078,26 @@ such a body layers its own faces ahead of the base one."
                     :state state
                     :acp-notification '((some-key . "some-value")))
                   '((adapted . t) (some-key . "some-value"))))))
+
+(ert-deftest agent-shell--subscribe-skips-suppressed-notifications-test ()
+  "Test a notification adapter can suppress notification dispatch."
+  (let* ((callback nil)
+         (state (agent-shell--make-state
+                 :agent-config
+                 (agent-shell-make-agent-config
+                  :identifier 'test
+                  :notification-adapter (lambda (&rest _) nil)))))
+    (map-put! state :client 'test-client)
+    (cl-letf (((symbol-function 'acp-subscribe-to-errors) #'ignore)
+              ((symbol-function 'acp-subscribe-to-requests) #'ignore)
+              ((symbol-function 'acp-subscribe-to-notifications)
+               (lambda (&rest args)
+                 (setq callback (plist-get args :on-notification))))
+              ((symbol-function 'agent-shell--on-notification)
+               (lambda (&rest _)
+                 (ert-fail "Suppressed notification was dispatched"))))
+      (agent-shell--subscribe-to-client-events :state state)
+      (funcall callback '((method . "session/update"))))))
 
 (ert-deftest agent-shell--buffer-name-prefix-test ()
   "Test `agent-shell--buffer-name-prefix' across formats."
@@ -6824,6 +7055,15 @@ reaching item navigation."
     (should (search-forward "docs"))
     (goto-char (match-beginning 0))
     (should (get-text-property (point) 'keymap))))
+
+(ert-deftest agent-shell-prompt-queue-key-binding-test ()
+  "Bind the prompt queue in shell and viewport buffers."
+  (should (eq (lookup-key agent-shell-mode-map (kbd "C-c /"))
+              #'agent-shell-prompt-queue))
+  (should (eq (lookup-key agent-shell-viewport-edit-mode-map (kbd "C-c /"))
+              #'agent-shell-viewport-prompt-queue))
+  (should (eq (lookup-key agent-shell-viewport-view-mode-map (kbd "C-c /"))
+              #'agent-shell-viewport-prompt-queue)))
 
 (ert-deftest agent-shell-backward-up-item-returns-to-a-table-s-first-cell ()
   (agent-shell-tests--with-rendered-shell

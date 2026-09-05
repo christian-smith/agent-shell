@@ -151,12 +151,47 @@ When non-nil, thought process sections are expanded."
   :group 'agent-shell)
 
 (defcustom agent-shell-tool-use-expand-by-default nil
-  "Whether tool use sections should be expanded by default.
+  "Control whether tool use sections are expanded by default.
 
-When nil (the default), tool use sections are collapsed.
-When non-nil, tool use sections are expanded."
-  :type 'boolean
+When nil (the default), all tool use sections are collapsed.  When t,
+all tool use sections are expanded.  When a function, call it with the
+normalized tool-call alist and expand the section when the function
+returns non-nil.
+
+For example, expand only edits:
+
+  (setq agent-shell-tool-use-expand-by-default
+        (lambda (tool-call)
+          (equal (map-elt tool-call :kind) \"edit\")))"
+  :type '(choice (const :tag "Never (collapsed)" nil)
+                 (const :tag "Always (expanded)" t)
+                 (function :tag "Predicate"))
   :group 'agent-shell)
+
+(defcustom agent-shell-tool-use-minimum-visible-seconds 5
+  "Minimum seconds an automatically expanded tool remains visible.
+
+This delays automatic activity-group folding after a tool selected by
+`agent-shell-tool-use-expand-by-default' is rendered.  A nil or zero
+value disables the delay."
+  :type '(choice (const :tag "No minimum" nil)
+                 (number :tag "Seconds"))
+  :group 'agent-shell)
+
+(defun agent-shell--tool-use-expanded-p (tool-call)
+  "Return non-nil when TOOL-CALL should start expanded.
+
+TOOL-CALL is a normalized tool-call alist.  For example:
+
+  (let ((agent-shell-tool-use-expand-by-default
+         (lambda (tool-call)
+           (equal (map-elt tool-call :kind) \"edit\"))))
+    (agent-shell--tool-use-expanded-p
+     (list (cons :kind \"edit\"))))
+  ;; => t"
+  (if (functionp agent-shell-tool-use-expand-by-default)
+      (funcall agent-shell-tool-use-expand-by-default tool-call)
+    agent-shell-tool-use-expand-by-default))
 
 (defcustom agent-shell-activity-group-expand-by-default 'latest
   "When activity group sections should be expanded.
@@ -686,6 +721,11 @@ Each element can be:
                                               session-meta
                                               mcp-servers
                                               notification-adapter
+                                              outgoing-request-decorator
+                                              session-response-adapter
+                                              request-handler
+                                              prompt-response-adapter
+                                              busy-prompt-handler
                                               icon-name
                                               install-instructions)
   "Create an agent configuration alist.
@@ -720,6 +760,17 @@ Keyword arguments:
   precedence over the global `agent-shell-mcp-servers'.  Same shape as
   that variable.
 - NOTIFICATION-ADAPTER: Optional function to modify/normalize `notification'
+- OUTGOING-REQUEST-DECORATOR: Optional function `(lambda (request) ...)'
+  that rewrites outgoing ACP requests before they are sent.
+- SESSION-RESPONSE-ADAPTER: Optional function called with
+  `:acp-response' after `session/new', `session/load', and
+  `session/resume'.  Must return the (possibly rewritten) ACP response.
+- REQUEST-HANDLER: Optional function called with `:state' and
+  `:acp-request' for incoming ACP requests.  Return non-nil when handled.
+- PROMPT-RESPONSE-ADAPTER: Optional function called with `:acp-response'
+  after `session/prompt'.  Return an ACP `usage' alist or nil.
+- BUSY-PROMPT-HANDLER: Optional function called when input is submitted
+  during an active prompt.  Return non-nil when the input was handled.
 - ICON-NAME: Name of the icon to use
 - INSTALL-INSTRUCTIONS: Instructions to show when executable is not found
 
@@ -739,6 +790,11 @@ Returns an alist with all specified values."
     (:session-meta . ,session-meta)
     (:mcp-servers . ,mcp-servers)
     (:notification-adapter . ,notification-adapter)            ;; function
+    (:outgoing-request-decorator . ,outgoing-request-decorator) ;; function
+    (:session-response-adapter . ,session-response-adapter)    ;; function
+    (:request-handler . ,request-handler)                      ;; function
+    (:prompt-response-adapter . ,prompt-response-adapter)      ;; function
+    (:busy-prompt-handler . ,busy-prompt-handler)              ;; function
     (:icon-name . ,icon-name)
     (:install-instructions . ,install-instructions)))
 
@@ -1189,6 +1245,7 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
         (cons :activity-group-count 0)
         (cons :activity-thoughts nil)
         (cons :expanded-activity-group nil)
+        (cons :activity-group-expansion-deadlines nil)
         (cons :request-count 0)
         (cons :last-activity-time nil)
         (cons :tool-calls nil)
@@ -2300,6 +2357,7 @@ mouse selection or a kill where mark > point) is normalized."
   "C-c C-v" #'agent-shell-set-session-model
   "C-c C-t" #'agent-shell-set-session-thought-level
   "C-c C-o" #'agent-shell-other-buffer
+  "C-c /" #'agent-shell-prompt-queue
   "C-c C-s" #'agent-shell-set-session-config-option
   "<remap> <yank>" #'agent-shell-yank-dwim
   "<remap> <comint-send-input>" #'agent-shell-submit)
@@ -2932,6 +2990,58 @@ can still be found once the turn ends."
               (list (cons :namespace-id (or namespace-id (map-elt state :request-count)))
                     (cons :group-id group-id)))))
 
+(defun agent-shell--note-tool-use-expansion (state group-id tool-call)
+  "Record and return whether TOOL-CALL in GROUP-ID starts expanded.
+
+STATE records the minimum visibility deadline for automatically expanded
+tools while the latest activity group policy is active."
+  (let ((expanded (agent-shell--tool-use-expanded-p tool-call)))
+    (when (and expanded
+               (eq agent-shell-activity-group-expand-by-default 'latest)
+               (numberp agent-shell-tool-use-minimum-visible-seconds)
+               (> agent-shell-tool-use-minimum-visible-seconds 0))
+      (let ((deadlines (cons
+                        (cons group-id
+                              (+ (float-time)
+                                 agent-shell-tool-use-minimum-visible-seconds))
+                        (map-delete
+                         (map-elt state :activity-group-expansion-deadlines)
+                         group-id))))
+        (agent-shell--set-activity-group-expansion-deadlines state deadlines)))
+    expanded))
+
+(defun agent-shell--set-activity-group-expansion-deadlines (state deadlines)
+  "Set STATE's activity-group expansion DEADLINES."
+  (if-let* ((entry (assq :activity-group-expansion-deadlines state)))
+      (setcdr entry deadlines)
+    (nconc state (list (cons :activity-group-expansion-deadlines deadlines)))))
+
+(defun agent-shell--collapse-activity-group-when-ready (state buffer group)
+  "Collapse GROUP in STATE once its minimum visibility time has elapsed.
+
+BUFFER is STATE's shell buffer.  A timer calls this function again when
+GROUP still has time remaining."
+  (unless (equal (map-elt group :group-id)
+                 (map-nested-elt state '(:expanded-activity-group :group-id)))
+    (let* ((group-id (map-elt group :group-id))
+           (deadline (map-nested-elt
+                      state
+                      (list :activity-group-expansion-deadlines group-id)))
+           (remaining (and deadline (- deadline (float-time)))))
+      (if (and remaining (> remaining 0))
+          (when (buffer-live-p buffer)
+            (run-at-time remaining nil
+                         #'agent-shell--collapse-activity-group-when-ready
+                         state buffer group))
+        (agent-shell--collapse-fragment-group
+         :state state
+         :namespace-id (map-elt group :namespace-id)
+         :block-id group-id)
+        (agent-shell--set-activity-group-expansion-deadlines
+         state
+         (map-delete (map-elt state :activity-group-expansion-deadlines)
+                     group-id))))))
+
 (defun agent-shell--collapse-expanded-activity-group (state)
   "Collapse the activity group STATE last left expanded, if any.
 
@@ -2939,11 +3049,9 @@ Called both when the agent moves on to a new group and when the turn ends,
 so a `latest' session is left with every activity group folded.
 Clears STATE's `:expanded-activity-group'."
   (when-let* ((group (map-elt state :expanded-activity-group)))
-    (agent-shell--collapse-fragment-group
-     :state state
-     :namespace-id (map-elt group :namespace-id)
-     :block-id (map-elt group :group-id))
-    (map-put! state :expanded-activity-group nil)))
+    (map-put! state :expanded-activity-group nil)
+    (agent-shell--collapse-activity-group-when-ready
+     state (map-elt state :buffer) group)))
 
 (cl-defun agent-shell--on-notification (&key state acp-notification)
   "Handle incoming ACP-NOTIFICATION using STATE."
@@ -3050,19 +3158,20 @@ Clears STATE's `:expanded-activity-group'."
             :event 'tool-call-update
             :data (list (cons :tool-call-id (map-nested-elt acp-notification '(params update toolCallId)))
                         (cons :tool-call (map-nested-elt state (list :tool-calls (map-nested-elt acp-notification '(params update toolCallId)))))))
-           (let ((tool-call-labels (agent-shell-make-tool-call-label
-                                    state (map-nested-elt acp-notification '(params update toolCallId))))
-                 (group-id (agent-shell--activity-group-id
-                            state (map-nested-elt acp-notification '(params update toolCallId)))))
+           (let* ((tool-call-id (map-nested-elt acp-notification '(params update toolCallId)))
+                  (tool-call-labels (agent-shell-make-tool-call-label state tool-call-id))
+                  (group-id (agent-shell--activity-group-id state tool-call-id))
+                  (tool-call (map-nested-elt state `(:tool-calls ,tool-call-id))))
              (agent-shell--update-fragment
               :state state
-              :block-id (map-nested-elt acp-notification '(params update toolCallId))
+              :block-id tool-call-id
               :label-left (map-elt tool-call-labels :status)
               :label-right (map-elt tool-call-labels :title)
               :group-id group-id
               :group-label agent-shell--activity-group-label
               :group-expanded (agent-shell--activity-group-initial-expanded-p)
-              :expanded agent-shell-tool-use-expand-by-default
+              :expanded (agent-shell--note-tool-use-expansion
+                         state group-id tool-call)
               :above-last-prompt (not (agent-shell--active-requests-p state)))
              (agent-shell--refresh-activity-group-header state group-id)
              (agent-shell--sync-activity-group-fold :state state :group-id group-id)
@@ -3311,10 +3420,10 @@ Clears STATE's `:expanded-activity-group'."
                ;; block-id must be the same as the one used as
                ;; agent-shell--update-fragment param by "session/request_permission".
                (agent-shell--delete-fragment :state state :block-id (format "permission-%s" (map-nested-elt acp-notification '(params update toolCallId)))))
-             (let* ((tool-call-labels (agent-shell-make-tool-call-label state (map-nested-elt acp-notification '(params update toolCallId))))
-                    (group-id (agent-shell--activity-group-id
-                               state (map-nested-elt acp-notification '(params update toolCallId))))
-                    (tool-call-id (map-nested-elt acp-notification '(params update toolCallId)))
+             (let* ((tool-call-id (map-nested-elt acp-notification '(params update toolCallId)))
+                    (tool-call-labels (agent-shell-make-tool-call-label state tool-call-id))
+                    (group-id (agent-shell--activity-group-id state tool-call-id))
+                    (tool-call (map-nested-elt state `(:tool-calls ,tool-call-id)))
                     (saved-command (map-nested-elt state `(:tool-calls ,tool-call-id :command)))
                     ;; Prepend fenced command to body for Bash-like
                     ;; tools.
@@ -3348,7 +3457,8 @@ Clears STATE's `:expanded-activity-group'."
                         (concat input-block "\n\n" (string-trim body-text)))
                        (t
                         (string-trim body-text)))
-                :expanded agent-shell-tool-use-expand-by-default
+                :expanded (agent-shell--note-tool-use-expansion
+                           state group-id tool-call)
                 :above-last-prompt (not (agent-shell--active-requests-p state)))
                (agent-shell--refresh-activity-group-header state group-id)
                (agent-shell--sync-activity-group-fold :state state :group-id group-id))
@@ -3514,6 +3624,10 @@ Clears STATE's `:expanded-activity-group'."
          (agent-shell-experimental--on-session-push-request
           :state state
           :acp-request acp-request))
+        ((and (functionp (map-nested-elt state '(:agent-config :request-handler)))
+              (funcall (map-nested-elt state '(:agent-config :request-handler))
+                       :state state
+                       :acp-request acp-request)))
         (t
          (let ((method (map-elt acp-request 'method)))
            (agent-shell--update-fragment
@@ -4711,6 +4825,7 @@ variable (see makunbound)"))
                                       :needs-authentication (map-elt config :needs-authentication)
                                       :authenticate-request-maker (map-elt config :authenticate-request-maker)
                                       :outgoing-request-decorator (or outgoing-request-decorator
+                                                                      (map-elt config :outgoing-request-decorator)
                                                                       agent-shell-outgoing-request-decorator)
                                       :agent-config config))
       ;; Initialize buffer-local shell-maker-config
@@ -7297,8 +7412,16 @@ Falls back to latest session in batch mode (e.g. tests)."
             (choice choice)))))))
 
 
+(defun agent-shell--adapt-session-response (acp-response)
+  "Return ACP-RESPONSE after optional agent-specific session adaptation."
+  (if-let* ((adapter (map-nested-elt agent-shell--state '(:agent-config :session-response-adapter)))
+            ((functionp adapter)))
+      (funcall adapter :acp-response acp-response)
+    acp-response))
+
 (cl-defun agent-shell--session-from-response (&key acp-response acp-session-id)
   "Return internal session state from ACP-RESPONSE and ACP-SESSION-ID."
+  (setq acp-response (agent-shell--adapt-session-response acp-response))
   (list (cons :id acp-session-id)
         (cons :config-options (agent-shell--normalize-config-options
                                (map-elt acp-response 'configOptions)))
@@ -7318,6 +7441,7 @@ Falls back to latest session in batch mode (e.g. tests)."
 
 (cl-defun agent-shell--set-session-from-response (&key acp-response acp-session-id)
   "Set active session state from ACP-RESPONSE and ACP-SESSION-ID."
+  (setq acp-response (agent-shell--adapt-session-response acp-response))
   (map-put! agent-shell--state
             :session (agent-shell--session-from-response
                       :acp-response acp-response
@@ -7423,6 +7547,7 @@ overwrites an existing fragment with equivalent content."
                            :session (agent-shell--session-from-response
                                      :acp-response acp-response
                                      :acp-session-id (map-elt acp-response 'sessionId)))
+                 (setq acp-response (agent-shell--adapt-session-response acp-response))
                  (agent-shell--save-config-options
                   :state agent-shell--state
                   :acp-config-options (map-elt acp-response 'configOptions))
@@ -7973,13 +8098,13 @@ The agent config's `:mcp-servers' take precedence over the global
   (acp-subscribe-to-notifications
    :client (map-elt state :client)
    :on-notification (lambda (acp-notification)
-                      (agent-shell--on-notification
-                       :state state
-                       :acp-notification
-                       (agent-shell--adapt-notification
-                        :state state
-                        :acp-notification acp-notification)
-                       )))
+                      (when-let* ((adapted
+                                   (agent-shell--adapt-notification
+                                    :state state
+                                    :acp-notification acp-notification)))
+                        (agent-shell--on-notification
+                         :state state
+                         :acp-notification adapted))))
   (acp-subscribe-to-requests
    :client (map-elt state :client)
    :on-request (lambda (acp-request)
@@ -8458,8 +8583,12 @@ reads the buffer's prompt capabilities."
                    ;; the last activity group `latest' left expanded.
                    (agent-shell--collapse-expanded-activity-group (agent-shell--state))
                    ;; Extract usage information from response
-                   (when (map-elt acp-response 'usage)
-                     (agent-shell--save-usage :state (agent-shell--state) :acp-usage (map-elt acp-response 'usage)))
+                   (when-let* ((usage (or (map-elt acp-response 'usage)
+                                          (when-let* ((adapter (map-nested-elt (agent-shell--state)
+                                                                               '(:agent-config :prompt-response-adapter)))
+                                                      ((functionp adapter)))
+                                            (funcall adapter :acp-response acp-response)))))
+                     (agent-shell--save-usage :state (agent-shell--state) :acp-usage usage))
                    (let ((success (equal (map-elt acp-response 'stopReason)
                                          "end_turn")))
                      ;; Display usage box at end of turn if enabled and data available
