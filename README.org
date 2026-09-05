@@ -137,6 +137,8 @@ Alternatively, install the [[https://developers.openai.com/codex/cli/][Codex CLI
 
 Codex can ask asynchronous questions while continuing its work. These appear in a separate question buffer without taking focus. Select =Answer= to choose suggested answers or enter your own text. Answers use the prompt queue: they steer a running turn or start a new turn when Codex is idle. Dismissing a question does not interrupt Codex.
 
+To disable command approvals and sandboxing for new or resumed Codex app-server sessions, set =(setq agent-shell-openai-codex-app-server-yolo-mode t)=. This allows commands and file changes outside the workspace without asking. The default is nil; running sessions and other agents are unchanged. MCP forms and user-input questions can still require a response.
+
 *** Gemini CLI
 
 For Google's [[https://github.com/google-gemini/gemini-cli][Gemini CLI]], be sure to get a recent release supporting the =--experimental-acp= flag.
