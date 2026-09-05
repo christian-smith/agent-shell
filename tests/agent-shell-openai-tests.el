@@ -103,6 +103,7 @@
   "YOLO configures the backend without changing the normal policy default."
   (dolist (enabled '(nil t))
     (let* ((agent-shell-openai-codex-transport 'app-server)
+           (agent-shell-openai-codex-app-server-command '("sh"))
            (agent-shell-openai-codex-app-server-yolo-mode enabled)
            (client (agent-shell-openai-make-codex-client :buffer (current-buffer)))
            (params (agent-shell-codex-app-server--thread-params client "/tmp")))
