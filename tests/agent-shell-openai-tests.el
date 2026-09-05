@@ -87,6 +87,7 @@
   (let ((agent-shell-openai-authentication
          (agent-shell-openai-make-authentication :login t))
         (agent-shell-openai-codex-transport 'app-server)
+        (agent-shell-openai-codex-app-server-yolo-mode nil)
         client-args)
     (cl-letf (((symbol-function 'agent-shell-codex-app-server-make-client)
                (lambda (&rest args)
@@ -94,7 +95,21 @@
       (agent-shell-openai-make-codex-client :buffer (current-buffer)))
     (should (equal (plist-get client-args :command) "codex"))
     (should (equal (plist-get client-args :command-params) '("app-server")))
+    (should (equal (plist-get client-args :approval-policy) "on-request"))
+    (should (equal (plist-get client-args :sandbox-mode) "workspace-write"))
     (should (eq (plist-get client-args :context-buffer) (current-buffer)))))
+
+(ert-deftest agent-shell-openai-app-server-yolo-policy-test ()
+  "YOLO configures the backend without changing the normal policy default."
+  (dolist (enabled '(nil t))
+    (let* ((agent-shell-openai-codex-transport 'app-server)
+           (agent-shell-openai-codex-app-server-yolo-mode enabled)
+           (client (agent-shell-openai-make-codex-client :buffer (current-buffer)))
+           (params (agent-shell-codex-app-server--thread-params client "/tmp")))
+      (should (equal (map-elt params 'approvalPolicy)
+                     (if enabled "never" "on-request")))
+      (should (equal (map-elt params 'sandbox)
+                     (if enabled "danger-full-access" "workspace-write"))))))
 
 (ert-deftest agent-shell-openai-app-server-config-enables-busy-input-test ()
   "Test that app-server Codex config enables active-turn steering."

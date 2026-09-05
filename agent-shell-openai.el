@@ -106,6 +106,19 @@ The first element is the command name, and the rest are command parameters."
   :type '(repeat string)
   :group 'agent-shell)
 
+(defcustom agent-shell-openai-codex-app-server-yolo-mode nil
+  "When non-nil, disable Codex app-server approvals and sandboxing.
+
+New and resumed sessions use approvalPolicy \"never\" and sandbox
+\"danger-full-access\", matching Codex CLI's YOLO mode.  Codex can run
+commands and modify files outside the workspace without asking.
+This does not auto-answer MCP forms or user-input questions, and does
+not change running sessions or other agents.
+
+  (setq agent-shell-openai-codex-app-server-yolo-mode t)"
+  :type 'boolean
+  :group 'agent-shell)
+
 (defcustom agent-shell-openai-codex-environment
   nil
   "Environment variables for the OpenAI Codex client.
@@ -240,6 +253,10 @@ Uses `agent-shell-openai-authentication' for authentication configuration."
      :command (car agent-shell-openai-codex-app-server-command)
      :command-params (cdr agent-shell-openai-codex-app-server-command)
      :environment-variables (agent-shell-openai--codex-app-server-environment)
+     :approval-policy (if agent-shell-openai-codex-app-server-yolo-mode
+                          "never" "on-request")
+     :sandbox-mode (if agent-shell-openai-codex-app-server-yolo-mode
+                       "danger-full-access" "workspace-write")
      :context-buffer buffer))
    ((not (eq agent-shell-openai-codex-transport 'acp))
     (error "Unsupported Codex transport: %s" agent-shell-openai-codex-transport))
