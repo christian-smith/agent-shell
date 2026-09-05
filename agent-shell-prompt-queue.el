@@ -45,9 +45,11 @@
 (declare-function agent-shell-experimental--send-steering "agent-shell-experimental")
 (declare-function agent-shell-completion--setup-minibuffer "agent-shell-completion")
 (declare-function shell-maker-busy "shell-maker")
+(declare-function yas-minor-mode "yasnippet")
 
 (defvar agent-shell--state)
 (defvar comint-input-ring)
+(defvar yas-extra-modes)
 
 ;; The queueing commands were renamed to the `agent-shell-prompt-queue'
 ;; namespace.  A package upgrade reloads this file into a running session
@@ -209,6 +211,41 @@ as \"active\" and the queued prompts, PROMPT included, as \"queued\"."
                     (ring-ref comint-input-ring 0))
    :pending-prompts (map-elt agent-shell--state :pending-prompts)))
 
+(defun agent-shell--prompt-queue-handle-busy (prompt)
+  "Let the current agent handle busy PROMPT, returning non-nil if claimed.
+
+The optional agent handler receives `:state', `:prompt', and a
+`:fallback' function.  Calling the fallback adds PROMPT to the normal
+next-turn queue, which preserves the input when an in-flight protocol
+request loses a race with turn completion."
+  (when-let* ((handler (map-nested-elt agent-shell--state
+                                       '(:agent-config :busy-prompt-handler)))
+              ((functionp handler)))
+    (let ((buffer (current-buffer))
+          fallback-called)
+      (let ((fallback (lambda ()
+                        (unless fallback-called
+                          (setq fallback-called t)
+                          (when (buffer-live-p buffer)
+                            (with-current-buffer buffer
+                              (agent-shell--prompt-queue-enqueue
+                               :prompt prompt)))))))
+        (condition-case err
+            (let ((handled (funcall handler
+                                    `((:state . ,agent-shell--state)
+                                      (:prompt . ,prompt)
+                                      (:fallback . ,fallback)))))
+              (cond
+               (fallback-called t)
+               (handled
+                (agent-shell--echo "Sent to active turn")
+                t)))
+          (error
+           (unless fallback-called
+             (message "Active-turn input failed: %s"
+                      (error-message-string err)))
+           fallback-called))))))
+
 (defvar agent-shell-prompt-queue-setup-minibuffer-functions nil
   "Abnormal hook run while reading a queued prompt from the minibuffer.
 
@@ -220,6 +257,34 @@ and runs with the minibuffer current, so it can decorate or extend the
 prompt the way that shell renders its own.  The shell is carried rather
 than looked up: it is resolved for the project, so it need not be the
 buffer the minibuffer was entered from.")
+
+(defun agent-shell--prompt-queue-setup-yasnippet (event)
+  "Enable the shell's Yasnippet tables for queued-prompt EVENT.
+
+EVENT identifies the source shell through `:shell-buffer'.  Leave the
+minibuffer unchanged when Yasnippet is unavailable."
+  (when-let* (((fboundp 'yas-minor-mode))
+              (shell-buffer (map-elt event :shell-buffer))
+              ((buffer-live-p shell-buffer)))
+    (let ((shell-modes
+           (with-current-buffer shell-buffer
+             (cons major-mode
+                   (when (boundp 'yas-extra-modes) yas-extra-modes)))))
+      (setq-local yas-extra-modes
+                  (delete-dups
+                   (append shell-modes
+                           (when (boundp 'yas-extra-modes) yas-extra-modes))))
+      (yas-minor-mode 1))))
+
+(defun agent-shell--prompt-queue-setup-newline (_event)
+  "Bind Shift-Return to insert a newline in a queued-prompt minibuffer."
+  (use-local-map (copy-keymap (current-local-map)))
+  (keymap-set (current-local-map) "S-<return>" #'newline))
+
+(add-hook 'agent-shell-prompt-queue-setup-minibuffer-functions
+          #'agent-shell--prompt-queue-setup-yasnippet)
+(add-hook 'agent-shell-prompt-queue-setup-minibuffer-functions
+          #'agent-shell--prompt-queue-setup-newline)
 
 (cl-defun agent-shell--prompt-queue-read (&key initial)
   "Read a queue prompt from the minibuffer.
@@ -284,9 +349,17 @@ commands when the agent has reported them."
       (setq prompt (or prompt (agent-shell--prompt-queue-read)))
       (when (string-empty-p (string-trim prompt))
         (user-error "No prompt given"))
-      (agent-shell-experimental--send-steering
-       :state (agent-shell--state)
-       :prompt prompt))))
+      (agent-shell--send-steering prompt))))
+
+(defun agent-shell--send-steering (prompt)
+  "Send PROMPT through the current agent's steering implementation."
+  (if (functionp (map-nested-elt agent-shell--state
+                                '(:agent-config :busy-prompt-handler)))
+      (unless (agent-shell--prompt-queue-handle-busy prompt)
+        (user-error "The agent could not accept active-turn input"))
+    (agent-shell-experimental--send-steering
+     :state (agent-shell--state)
+     :prompt prompt)))
 
 (defcustom agent-shell-busy-submit-default-function
   #'agent-shell-busy-submit-queue
@@ -342,9 +415,7 @@ refuses outright.
 Steering is not additive: see `agent-shell-prompt-steer' for what the
 agent may drop in order to change course."
   (if (agent-shell-steering-supported-p)
-      (agent-shell-experimental--send-steering
-       :state (agent-shell--state)
-       :prompt prompt)
+      (agent-shell--send-steering prompt)
     (agent-shell--prompt-queue-enqueue :prompt prompt)))
 
 (cl-defun agent-shell--busy-submit (&key prompt override)
