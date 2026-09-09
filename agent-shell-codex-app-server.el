@@ -45,6 +45,12 @@ and compliance logs identify Agent Shell separately.")
 (defvar agent-shell--state)
 (defvar agent-shell--version)
 (defvar agent-shell-codex-app-server--instance-count 0)
+
+(defvar agent-shell-codex-app-server-question-hook nil
+  "Hook run once when asynchronous Codex questions are displayed.
+Each function receives a context alist with :client, :buffer,
+:questions, and :status.  For example, :buffer is the question buffer
+and :questions contains the server's question titles and options.")
 (defvar agent-shell-codex-app-server--output-flush-interval 0.25
   "Seconds to debounce streamed tool output updates.")
 
@@ -187,6 +193,7 @@ APPROVAL-POLICY, SANDBOX-MODE, and CONNECTION-TYPE."
         (cons :current-model-id nil)
         (cons :available-models nil)
         (cons :reasoning-effort "medium")
+        (cons :reconnecting nil)
         (cons :latest-token-usage nil)
         (cons :pending-agent-message nil)
         (cons :pending-prompt nil)
@@ -1352,10 +1359,10 @@ Answers use the originating shell's prompt queue, not a server RPC reply."
     (let* ((buffer (generate-new-buffer
                     (format "*Codex questions: %s*"
                             (or (map-elt client :context-buffer) id))))
-           (context `((:client . ,client)
-                      (:buffer . ,buffer)
-                      (:questions . ,questions)
-                      (:status . pending))))
+           (context (list (cons :client client)
+                          (cons :buffer buffer)
+                          (cons :questions questions)
+                          (cons :status 'pending))))
       (puthash id context (map-elt client :async-questions))
       (with-current-buffer buffer
         (special-mode)
@@ -1376,7 +1383,8 @@ Answers use the originating shell's prompt queue, not a server RPC reply."
                      (setf (map-elt context :status) 'dismissed)
                      (kill-buffer buffer)))
           (goto-char (point-min))))
-      (display-buffer buffer))))
+      (display-buffer buffer)
+      (run-hook-with-args 'agent-shell-codex-app-server-question-hook context))))
 
 (defun agent-shell-codex-app-server--result-text (item)
   "Extract human-readable result text from ITEM."
@@ -3217,6 +3225,90 @@ Use REQUEST-ID with OPTION-ID or CANCELLED to pick the response."
           client
           (agent-shell-codex-app-server--cancelled-turn turn-id)))))
     (agent-shell-codex-app-server--interrupt-turn client turn-id)))
+
+(defun agent-shell-codex-app-server-reconnect ()
+  "Reconnect an idle Codex shell using the credentials currently on disk.
+Run `codex-auth switch' first, then invoke this command in the shell.
+Preserve the buffer and resume its thread without replaying history.
+Background terminals and browser connections may not survive reconnecting."
+  (interactive)
+  (let* ((shell (current-buffer))
+         (state (and (boundp 'agent-shell--state) agent-shell--state))
+         (old (map-elt state :client))
+         (thread (map-elt old :thread-id)))
+    (unless (and (agent-shell-codex-app-server-client-p old) thread)
+      (user-error "Use this command in an initialized Codex app-server shell"))
+    (when (or (map-elt old :active-turn-id)
+              (map-elt old :pending-prompt)
+              (map-elt state :active-requests)
+              (> (hash-table-count (map-elt old :pending-requests)) 0)
+              (map-elt old :reconnecting))
+      (user-error "Wait for the current requests or reconnect to finish"))
+    (when (seq-some (lambda (context)
+                     (memq (map-elt context :status) '(pending answering)))
+                   (hash-table-values (map-elt old :async-questions)))
+      (user-error "Answer or dismiss pending Codex questions before reconnecting"))
+    (unless (yes-or-no-p "Reconnect Codex? Background terminals and browser connections may be lost. ")
+      (user-error "Reconnect cancelled"))
+    (let ((replacement
+           (agent-shell-codex-app-server-make-client
+            :command (map-elt old :command)
+            :command-params (map-elt old :command-params)
+            :environment-variables (map-elt old :environment-variables)
+            :context-buffer shell
+            :approval-policy (map-elt old :approval-policy)
+            :sandbox-mode (map-elt old :sandbox-mode)
+            :connection-type (map-elt old :connection-type)))
+          (cwd default-directory)
+          finished timer failure)
+      (map-put! old :reconnecting t)
+      (setq failure
+            (lambda (&rest _error)
+              (unless finished
+                (setq finished t)
+                (when timer (cancel-timer timer))
+                (map-put! old :reconnecting nil)
+                (agent-shell-codex-app-server-shutdown :client replacement)
+                (message "Codex reconnect failed; the original connection and buffer were retained"))))
+      (setq timer (run-at-time 60 nil failure))
+      (map-put! replacement :current-model-id (map-elt old :current-model-id))
+      (map-put! replacement :reasoning-effort (map-elt old :reasoning-effort))
+      (condition-case err
+          (agent-shell-codex-app-server-send-request
+           :client replacement :buffer shell
+           :request '((:method . "initialize"))
+           :on-failure failure
+           :on-success
+           (lambda (_result)
+             (unless finished
+               (agent-shell-codex-app-server--send-rpc-request
+                :client replacement :buffer shell :method "thread/resume"
+                :params (append `((threadId . ,thread) (excludeTurns . t))
+                                (agent-shell-codex-app-server--thread-params replacement cwd))
+                :on-failure failure
+                :on-success
+                (lambda (result)
+                  (unless finished
+                    (if (not (and (buffer-live-p shell)
+                                  (eq (buffer-local-value 'agent-shell--state shell) state)
+                                  (eq (map-elt state :client) old)
+                                  (not (map-elt old :active-turn-id))
+                                  (not (map-elt old :pending-prompt))
+                                  (not (map-elt state :active-requests))
+                                  (= (hash-table-count (map-elt old :pending-requests)) 0)
+                                  (equal (map-nested-elt result '(thread id)) thread)))
+                        (funcall failure)
+                      (setq finished t)
+                      (cancel-timer timer)
+                      (map-put! replacement :thread-id thread)
+                      (dolist (key '(:notification-handlers :request-handlers :error-handlers
+                                     :available-models))
+                        (map-put! replacement key (map-elt old key)))
+                      (map-put! state :client replacement)
+                      (map-put! old :reconnecting nil)
+                      (agent-shell-codex-app-server-shutdown :client old)
+                      (message "Codex reconnected using current credentials; conversation preserved"))))))))
+        (error (funcall failure err))))))
 
 (cl-defun agent-shell-codex-app-server-shutdown (&key client)
   "Shut down CLIENT."
