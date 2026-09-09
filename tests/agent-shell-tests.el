@@ -4530,6 +4530,29 @@ is no `rawInput'."
                             (content (type . "text")
                                      (text . "Allow linking to this session?")))]))))))
 
+(ert-deftest agent-shell--permission-title-large-text-test ()
+  "Large commands, raw input, and output need no regular expressions."
+  (let ((text (concat "[literal.*]" (make-string 100000 ?x))))
+    (should (equal text
+                   (agent-shell--permission-title
+                    :tool-call `((:title . ,text)
+                                 (:raw-input . ((command . ,text)))))))
+    (should (equal (concat "Tool\n\n" text)
+                   (agent-shell--permission-title
+                    :tool-call `((:title . "Tool")
+                                 (:kind . "other")
+                                 (:raw-input . ((expression . ,text)))
+                                 (:content . [((content . ((text . ,text))))
+                                              ((content . ((text . ,text))))])))))))
+
+(ert-deftest agent-shell--tool-text-contains-case-fold-test ()
+  "Literal tool text matching respects case folding and regexp punctuation."
+  (let ((case-fold-search t))
+    (should (agent-shell--tool-text-contains-p "READ [a.*]" "read [a.*]")))
+  (let ((case-fold-search nil))
+    (should-not (agent-shell--tool-text-contains-p "READ [a.*]" "read [a.*]"))
+    (should-not (agent-shell--tool-text-contains-p "read abc" "a.*"))))
+
 (ert-deftest agent-shell--permission-title-content-dedup-against-title-test ()
   "Skip `content' text already mentioned in the title.
 Claude populates `content' with the same string as
