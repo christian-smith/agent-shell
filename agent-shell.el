@@ -9417,6 +9417,13 @@ For example:
         (t
          (concat (string-trim-right text) " (" detail ")"))))
 
+(defun agent-shell--tool-text-contains-p (text substring)
+  "Return non-nil when TEXT contains literal SUBSTRING.
+Honor `case-fold-search', so \"Read\" contains \"read\" when it is non-nil."
+  (if case-fold-search
+      (string-search (downcase substring) (downcase text))
+    (string-search substring text)))
+
 (cl-defun agent-shell--permission-title (&key tool-call)
   "Build a display title for a permission dialog from TOOL-CALL.
 
@@ -9483,7 +9490,7 @@ For example:
          (text (if (and (stringp title)
                         (stringp command)
                         (not (string-empty-p command))
-                        (string-match-p (regexp-quote command) title))
+                        (agent-shell--tool-text-contains-p title command))
                    title
                  (or command title))))
     ;; Append filename to title when available and not
@@ -9493,7 +9500,7 @@ For example:
                                (file-name-nondirectory filepath)))
                 ((not (string-empty-p filename)))
                 ((or (not text)
-                     (not (string-match-p (regexp-quote filename) text)))))
+                     (not (agent-shell--tool-text-contains-p text filename)))))
       (setq text (agent-shell--append-title-detail :text text :detail filename)))
     ;; Append the URL to the title when available and not already
     ;; included, so the user can see which URL the permission applies
@@ -9502,7 +9509,7 @@ For example:
     (when-let* ((url)
                 ((not (string-empty-p url)))
                 ((or (not text)
-                     (not (string-match-p (regexp-quote url) text)))))
+                     (not (agent-shell--tool-text-contains-p text url)))))
       (setq text (agent-shell--append-title-detail :text text :detail url)))
     ;; Fence execute commands so the markdown renderer
     ;; renders them verbatim, not as markdown.
@@ -9523,9 +9530,9 @@ For example:
                 ((stringp input-value))
                 ((not (string-empty-p input-value)))
                 ((or (not text)
-                     (not (string-match-p (regexp-quote input-value) text))))
+                     (not (agent-shell--tool-text-contains-p text input-value))))
                 ((not (seq-find (lambda (c-text)
-                                  (string-match-p (regexp-quote input-value) c-text))
+                                  (agent-shell--tool-text-contains-p c-text input-value))
                                 content-texts))))
       (let ((fenced (agent-shell--format-tool-call-input raw-input)))
         (setq text (if text (concat text "\n\n" fenced) fenced))))
@@ -9534,7 +9541,7 @@ For example:
     ;; have (e.g. Claude mirrors `rawInput.description' in `content').
     (dolist (content-text content-texts)
       (unless (and text
-                   (string-match-p (regexp-quote content-text) text))
+                   (agent-shell--tool-text-contains-p text content-text))
         (setq text (if text
                        (concat text "\n\n" content-text)
                      content-text))))
@@ -9545,11 +9552,11 @@ For example:
     (dolist (path location-paths)
       (when-let* ((basename (file-name-nondirectory path))
                   ((or (not text)
-                       (not (string-match-p (regexp-quote path) text))))
+                       (not (agent-shell--tool-text-contains-p text path))))
                   ((or (not text)
                        (equal basename path)
                        (string-empty-p basename)
-                       (not (string-match-p (regexp-quote basename) text)))))
+                       (not (agent-shell--tool-text-contains-p text basename)))))
         (setq text (agent-shell--append-title-detail :text text :detail path))))
     text))
 
