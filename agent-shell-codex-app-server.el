@@ -2872,6 +2872,12 @@ pages are loaded."
   (let* ((method (map-elt request :method))
          (params (or (map-elt request :params) '())))
     (pcase method
+      ((and _ (guard (map-elt client :reconnecting)))
+       (when on-failure
+         (funcall on-failure
+                  (agent-shell-codex-app-server--make-error
+                   "Codex is reconnecting; wait before sending another request")
+                  nil)))
       ("initialize"
        (agent-shell-codex-app-server--send-rpc-request
         :client client
@@ -3226,6 +3232,38 @@ Use REQUEST-ID with OPTION-ID or CANCELLED to pick the response."
           (agent-shell-codex-app-server--cancelled-turn turn-id)))))
     (agent-shell-codex-app-server--interrupt-turn client turn-id)))
 
+;;;###autoload
+(defun agent-shell-codex-app-server-show-account ()
+  "Show the running Codex shell's account without refreshing credentials.
+For example, display the account email and plan reported by app-server,
+not the account selected on disk by an external account switcher."
+  (interactive)
+  (let ((client (and (boundp 'agent-shell--state)
+                     (map-elt agent-shell--state :client)))
+        (name (buffer-name)))
+    (unless (and (agent-shell-codex-app-server-client-p client)
+                 (agent-shell-codex-app-server--client-started-p client))
+      (user-error "Use this command in a running Codex app-server shell"))
+    (agent-shell-codex-app-server--send-rpc-request
+     :client client
+     :buffer (current-buffer)
+     :method "account/read"
+     :params `((refreshToken . ,(agent-shell-codex-app-server--json-bool nil)))
+     :on-success
+     (lambda (result)
+       (let ((account (map-elt result 'account)))
+         (message "%s: Codex account: %s%s"
+                  name
+                  (or (map-elt account 'email)
+                      (map-elt account 'type)
+                      "Not signed in")
+                  (if-let* ((plan (map-elt account 'planType)))
+                      (format " (%s)" plan)
+                    ""))))
+     :on-failure
+     (lambda (&rest _error)
+       (message "%s: Could not read the running Codex account" name)))))
+
 (defun agent-shell-codex-app-server-reconnect ()
   "Reconnect an idle Codex shell using the credentials currently on disk.
 Run `codex-auth switch' first, then invoke this command in the shell.
@@ -3260,17 +3298,26 @@ Background terminals and browser connections may not survive reconnecting."
             :sandbox-mode (map-elt old :sandbox-mode)
             :connection-type (map-elt old :connection-type)))
           (cwd default-directory)
-          finished timer failure)
+          finished timer failure retired)
+      (unless (assq :reconnecting old)
+        (nconc old (list (cons :reconnecting nil))))
       (map-put! old :reconnecting t)
       (setq failure
-            (lambda (&rest _error)
+            (lambda (&optional reason &rest _error)
               (unless finished
                 (setq finished t)
                 (when timer (cancel-timer timer))
                 (map-put! old :reconnecting nil)
+                (map-put! replacement :reconnecting nil)
                 (agent-shell-codex-app-server-shutdown :client replacement)
-                (message "Codex reconnect failed; the original connection and buffer were retained"))))
-      (setq timer (run-at-time 60 nil failure))
+                (message "Codex reconnect failed: %s. %s"
+                         (or (and (stringp reason) reason)
+                             (and (listp reason) (map-elt reason 'message))
+                             "Unexpected reconnect error")
+                         (if retired
+                             "Buffer retained; run reconnect again to retry"
+                           "Original connection and buffer retained")))))
+      (setq timer (run-at-time 60 nil failure "Timed out after 60 seconds"))
       (map-put! replacement :current-model-id (map-elt old :current-model-id))
       (map-put! replacement :reasoning-effort (map-elt old :reasoning-effort))
       (condition-case err
@@ -3281,6 +3328,22 @@ Background terminals and browser connections may not survive reconnecting."
            :on-success
            (lambda (_result)
              (unless finished
+               (if (not (and (buffer-live-p shell)
+                             (eq (buffer-local-value 'agent-shell--state shell) state)
+                             (eq (map-elt state :client) old)
+                             (not (map-elt old :active-turn-id))
+                             (not (map-elt old :pending-prompt))
+                             (not (map-elt state :active-requests))
+                             (= (hash-table-count (map-elt old :pending-requests)) 0)))
+                   (funcall failure "Session became busy or changed")
+                 (setq retired t)
+                 (agent-shell-codex-app-server-shutdown :client old)
+                 (map-put! replacement :thread-id thread)
+                 (map-put! replacement :reconnecting t)
+                 (dolist (key '(:notification-handlers :request-handlers :error-handlers
+                                :available-models))
+                   (map-put! replacement key (map-elt old key)))
+                 (map-put! state :client replacement)
                (agent-shell-codex-app-server--send-rpc-request
                 :client replacement :buffer shell :method "thread/resume"
                 :params (append `((threadId . ,thread) (excludeTurns . t))
@@ -3291,24 +3354,19 @@ Background terminals and browser connections may not survive reconnecting."
                   (unless finished
                     (if (not (and (buffer-live-p shell)
                                   (eq (buffer-local-value 'agent-shell--state shell) state)
-                                  (eq (map-elt state :client) old)
-                                  (not (map-elt old :active-turn-id))
-                                  (not (map-elt old :pending-prompt))
+                                  (eq (map-elt state :client) replacement)
+                                  (not (map-elt replacement :active-turn-id))
+                                  (not (map-elt replacement :pending-prompt))
                                   (not (map-elt state :active-requests))
                                   (= (hash-table-count (map-elt old :pending-requests)) 0)
                                   (equal (map-nested-elt result '(thread id)) thread)))
-                        (funcall failure)
+                        (funcall failure "Session changed while resuming")
                       (setq finished t)
                       (cancel-timer timer)
-                      (map-put! replacement :thread-id thread)
-                      (dolist (key '(:notification-handlers :request-handlers :error-handlers
-                                     :available-models))
-                        (map-put! replacement key (map-elt old key)))
-                      (map-put! state :client replacement)
+                      (map-put! replacement :reconnecting nil)
                       (map-put! old :reconnecting nil)
-                      (agent-shell-codex-app-server-shutdown :client old)
-                      (message "Codex reconnected using current credentials; conversation preserved"))))))))
-        (error (funcall failure err))))))
+                      (message "Codex reconnected using current credentials; conversation preserved")))))))))
+        (error (funcall failure (error-message-string err)))))))
 
 (cl-defun agent-shell-codex-app-server-shutdown (&key client)
   "Shut down CLIENT."
