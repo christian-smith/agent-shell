@@ -289,6 +289,104 @@ Codex sends `TurnPlanUpdatedNotification' with the steps directly under
                                    '(params update content text))
                    "thinking"))))
 
+(ert-deftest agent-shell-codex-app-server-resolves-web-search-citations ()
+  "Structured web search results should turn citations into Markdown links."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications)
+    (acp-subscribe-to-notifications
+     :client client
+     :on-notification (lambda (notification)
+                        (push notification notifications)))
+    (agent-shell-codex-app-server--handle-notification
+     client
+     '((method . "item/completed")
+       (params . ((item . ((id . "search-1")
+                           (type . "webSearch")
+                           (query . "documentation")
+                           (status . "completed")
+                           (action . ((type . "search")))
+                           (results . (((ref_id . "turn1search0")
+                                        (url . "https://example.com/one")
+                                        (title . "One"))
+                                       ((ref_id . "turn1search1")
+                                        (url . "https://example.com/two")
+                                        (title . "Two"))))))))))
+    (agent-shell-codex-app-server--handle-notification
+     client
+     '((method . "turn/completed")
+       (params . ((turn . ((id . "turn-1")
+                           (status . "completed")))))))
+    (setq notifications nil)
+    (agent-shell-codex-app-server--handle-notification
+     client
+     '((method . "item/agentMessage/delta")
+       (params . ((itemId . "message-1")
+                  (delta . "Claim. citeturn1search0turn1search1")))))
+    (should (equal (map-nested-elt (car notifications)
+                                   '(params update content text))
+                   "Claim. [source 1](<https://example.com/one>) [source 2](<https://example.com/two>)"))))
+
+(ert-deftest agent-shell-codex-app-server-bounds-web-search-citation-cache ()
+  "Citation resolution should retain only the newest structured results."
+  (let ((agent-shell-codex-app-server--web-search-result-limit 2)
+        (client (agent-shell-codex-app-server-make-client :command "sh")))
+    (agent-shell-codex-app-server--record-web-search-results
+     client
+     '((results . (((ref_id . "turn1search0")
+                    (url . "https://example.com/zero"))
+                   ((ref_id . "turn1search1")
+                    (url . "https://example.com/one"))
+                   ((ref_id . "turn1search2")
+                    (url . "https://example.com/two"))))))
+    (should-not (gethash "turn1search0" (map-elt client :web-search-results)))
+    (should (gethash "turn1search1" (map-elt client :web-search-results)))
+    (should (gethash "turn1search2" (map-elt client :web-search-results)))))
+
+(ert-deftest agent-shell-codex-app-server-buffers-split-web-citations ()
+  "Web citation delimiters should survive arbitrary streaming boundaries."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications)
+    (acp-subscribe-to-notifications
+     :client client
+     :on-notification (lambda (notification)
+                        (push notification notifications)))
+    (agent-shell-codex-app-server--record-web-search-results
+     client
+     '((results . (((ref_id . "turn1search0")
+                    (url . "https://example.com/source")
+                    (title . "Source"))))))
+    (dolist (delta '("Claim. ci"
+                     "teturn1search0"
+                     " Done."))
+      (agent-shell-codex-app-server--handle-notification
+       client
+       `((method . "item/agentMessage/delta")
+         (params . ((itemId . "message-1")
+                    (delta . ,delta))))))
+    (should (= (length notifications) 2))
+    (should (equal (map-nested-elt (cadr notifications)
+                                   '(params update content text))
+                   "Claim. "))
+    (should (equal (map-nested-elt (car notifications)
+                                   '(params update content text))
+                   "[source](<https://example.com/source>) Done."))))
+
+(ert-deftest agent-shell-codex-app-server-hides-unresolved-web-citation-markers ()
+  "Unknown web references should not expose private citation delimiters."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        delivered)
+    (acp-subscribe-to-notifications
+     :client client
+     :on-notification (lambda (notification)
+                        (setq delivered notification)))
+    (agent-shell-codex-app-server--handle-notification
+     client
+     '((method . "item/agentMessage/delta")
+       (params . ((itemId . "message-1")
+                  (delta . "Claim. citeturn1search0")))))
+    (should (equal (map-nested-elt delivered '(params update content text))
+                   "Claim. (source unavailable)"))))
+
 (ert-deftest agent-shell-codex-app-server-ignores-child-thread-notifications ()
   "Child thread output should not enter the parent Agent Shell view."
   (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
@@ -513,13 +611,20 @@ Codex sends `TurnPlanUpdatedNotification' with the steps directly under
       (insert "Conversation\nDraft")
       (let* ((old (agent-shell-codex-app-server-make-client :command "sh"))
              (agent-shell--state (list (cons :client old)))
-             resume stopped)
+             resume stopped model-fetches)
         (map-put! old :thread-id "thread-1")
+        (map-put! old :available-models '(((model . "stale-model"))))
         (setq old (assq-delete-all :reconnecting old))
         (should-not (assq :reconnecting old))
         (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
                   ((symbol-function 'agent-shell-codex-app-server-send-request)
                    (lambda (&rest args) (funcall (plist-get args :on-success) nil)))
+                  ((symbol-function 'agent-shell-codex-app-server--fetch-models)
+                   (lambda (client on-success &optional _on-failure)
+                     (setq model-fetches (1+ (or model-fetches 0)))
+                     (map-put! client :available-models
+                               '(((model . "fresh-model"))))
+                     (funcall on-success)))
                   ((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
                    (lambda (&rest args)
                      (should (memq old stopped))
@@ -528,6 +633,11 @@ Codex sends `TurnPlanUpdatedNotification' with the steps directly under
                    (lambda (&rest args) (push (plist-get args :client) stopped))))
           (agent-shell-codex-app-server-reconnect)
           (should-not (eq (map-elt agent-shell--state :client) old))
+          (should (= model-fetches 1))
+          (should (equal (mapcar #'agent-shell-codex-app-server--model-id
+                                 (map-elt (map-elt agent-shell--state :client)
+                                          :available-models))
+                         '("fresh-model")))
           (should (equal (plist-get resume :method) "thread/resume"))
           (should (eq (map-elt (plist-get resume :params) 'excludeTurns) t))
           (when (eq outcome 'busy)
@@ -1974,6 +2084,62 @@ Sending them as empty strings would fail the server's typed schema."
     (should (equal (mapcar (lambda (model) (map-elt model 'model))
                            (map-elt client :available-models))
                    '("gpt-5.1" "gpt-5.2")))))
+
+(ert-deftest agent-shell-codex-app-server-model-list-failure-preserves-catalog ()
+  "A failed model refresh should preserve the last complete catalog."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        failure)
+    (map-put! client :available-models '(((model . "existing-model"))))
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+               (lambda (&rest args)
+                 (funcall (plist-get args :on-failure)
+                          '((message . "Unavailable")) nil))))
+      (agent-shell-codex-app-server--fetch-models
+       client #'ignore
+       (lambda (error _raw)
+         (setq failure error))))
+    (should (equal (map-elt failure 'message) "Unavailable"))
+    (should (equal (mapcar #'agent-shell-codex-app-server--model-id
+                           (map-elt client :available-models))
+                   '("existing-model")))))
+
+(ert-deftest agent-shell-codex-app-server-refresh-models-updates-live-session ()
+  "Refreshing models should update the running client and shell choices."
+  (with-temp-buffer
+    (let* ((client (agent-shell-codex-app-server-make-client
+                    :command "sh"
+                    :context-buffer (current-buffer)))
+           (agent-shell--state
+            `((:client . ,client)
+              (:session . ((:id . "thread-1")
+                           (:model-id . "existing-model")
+                           (:models . (((:model-id . "existing-model"))))
+                           (:mode-id . "reasoning:medium")
+                           (:modes . nil)))))
+           notice)
+      (map-put! client :current-model-id "existing-model")
+      (map-put! client :reasoning-effort "medium")
+      (map-put! client :available-models '(((model . "existing-model"))))
+      (cl-letf (((symbol-function 'agent-shell-codex-app-server--client-started-p)
+                 (lambda (_client) t))
+                ((symbol-function 'agent-shell-codex-app-server--fetch-models)
+                 (lambda (target on-success &optional _on-failure)
+                   (map-put! target :available-models
+                             '(((model . "existing-model")
+                                (displayName . "Existing Model"))
+                               ((model . "new-model")
+                                (displayName . "New Model"))))
+                   (funcall on-success)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (setq notice (apply #'format format-string args)))))
+        (agent-shell-codex-app-server-refresh-models))
+      (should (equal (mapcar (lambda (model) (map-elt model :model-id))
+                             (map-nested-elt agent-shell--state '(:session :models)))
+                     '("existing-model" "new-model")))
+      (should (equal (map-nested-elt agent-shell--state '(:session :model-id))
+                     "existing-model"))
+      (should (string-match-p "added new-model" notice)))))
 
 (ert-deftest agent-shell-codex-app-server-session-response-includes-reasoning-modes ()
   "Session responses should expose synthetic reasoning-effort modes."

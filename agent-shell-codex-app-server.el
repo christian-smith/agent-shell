@@ -56,6 +56,7 @@ and :questions contains the server's question titles and options.")
 
 (declare-function agent-shell--build-content-blocks "agent-shell")
 (declare-function agent-shell-prompt-queue "agent-shell-prompt-queue")
+(declare-function agent-shell--update-header-and-mode-line "agent-shell")
 
 (defconst agent-shell-codex-app-server--tool-output-display-limit
   (* 256 1024)
@@ -64,6 +65,18 @@ and :questions contains the server's question titles and options.")
 (defconst agent-shell-codex-app-server--tool-output-truncated-prefix
   "[... earlier tool output omitted ...]\n"
   "Prefix added to truncated tool output.")
+
+(defconst agent-shell-codex-app-server--citation-open "cite"
+  "Opening delimiter for a Codex web citation.")
+
+(defconst agent-shell-codex-app-server--citation-separator ""
+  "Delimiter between Codex web citation reference ids.")
+
+(defconst agent-shell-codex-app-server--citation-close ""
+  "Closing delimiter for a Codex web citation.")
+
+(defconst agent-shell-codex-app-server--web-search-result-limit 4096
+  "Maximum number of web search results retained for citation resolution.")
 
 (defconst agent-shell-codex-app-server--auto-resolved
   'agent-shell-codex-app-server--auto-resolved
@@ -188,6 +201,9 @@ APPROVAL-POLICY, SANDBOX-MODE, and CONNECTION-TYPE."
         (cons :tool-output-chunks (make-hash-table :test #'equal))
         (cons :pending-tool-output-items (make-hash-table :test #'equal))
         (cons :tool-output-flush-timer nil)
+        (cons :web-search-results (make-hash-table :test #'equal))
+        (cons :web-search-result-ids nil)
+        (cons :citation-buffers (make-hash-table :test #'equal))
         (cons :thread-id nil)
         (cons :active-turn-id nil)
         (cons :current-model-id nil)
@@ -1637,7 +1653,9 @@ newest-first chunks to fill the display limit."
   "Discard all provider-side tool translation state for CLIENT."
   (agent-shell-codex-app-server--clear-pending-tool-output client)
   (clrhash (map-elt client :tool-items))
-  (clrhash (map-elt client :tool-outputs)))
+  (clrhash (map-elt client :tool-outputs))
+  (clrhash (agent-shell-codex-app-server--state-table
+            client :citation-buffers)))
 
 (defun agent-shell-codex-app-server--flush-tool-output-updates (client)
   "Dispatch all queued streamed tool output updates for CLIENT."
@@ -2257,6 +2275,143 @@ returns
        (string-match-p "\\`[ \t]*#+[ \t]+[^ \t\n]" line))
      lines)))
 
+(defun agent-shell-codex-app-server--state-table (client key)
+  "Return CLIENT's hash table at KEY, creating it when absent.
+
+Creating missing slots keeps clients made before a live module reload usable."
+  (or (map-elt client key)
+      (let ((table (make-hash-table :test #'equal)))
+        (nconc client (list (cons key table)))
+        table)))
+
+(defun agent-shell-codex-app-server--set-state-value (client key value)
+  "Set CLIENT's KEY to VALUE, including for clients missing the slot."
+  (if-let* ((entry (assq key client)))
+      (setcdr entry value)
+    (nconc client (list (cons key value))))
+  value)
+
+(defun agent-shell-codex-app-server--record-web-search-results (client item)
+  "Record structured web search results from ITEM for CLIENT."
+  (let ((results-table
+         (agent-shell-codex-app-server--state-table client :web-search-results))
+        (result-ids (map-elt client :web-search-result-ids)))
+    (unless (assq :web-search-result-ids client)
+      (maphash (lambda (reference-id _result)
+                 (push reference-id result-ids))
+               results-table))
+    (dolist (result (append (map-elt item 'results) nil))
+      (let ((reference-id (or (map-elt result 'ref_id)
+                              (map-elt result 'refId)))
+            (url (map-elt result 'url))
+            (title (map-elt result 'title)))
+        (when (and (stringp reference-id)
+                   (stringp url)
+                   (not (string-empty-p reference-id))
+                   (not (string-empty-p url)))
+          (unless (gethash reference-id results-table)
+            (push reference-id result-ids))
+          (puthash reference-id
+                   `((:url . ,url)
+                     (:title . ,title))
+                   results-table))))
+    (while (> (hash-table-count results-table)
+              agent-shell-codex-app-server--web-search-result-limit)
+      (remhash (car (last result-ids)) results-table)
+      (setq result-ids (butlast result-ids)))
+    (agent-shell-codex-app-server--set-state-value
+     client :web-search-result-ids result-ids)))
+
+(defun agent-shell-codex-app-server--citation-replacement (client body)
+  "Return Markdown links for the Codex web citation BODY in CLIENT."
+  (let* ((references (split-string
+                      body
+                      (regexp-quote
+                       agent-shell-codex-app-server--citation-separator)
+                      t))
+         (multiple (> (length references) 1))
+         (results-table
+          (agent-shell-codex-app-server--state-table client :web-search-results)))
+    (string-join
+     (seq-map-indexed
+      (lambda (reference-id index)
+        (let* ((result (gethash reference-id results-table))
+               (url (map-elt result :url))
+               (label (if multiple
+                          (format "source %d" (1+ index))
+                        "source")))
+          (if (and (stringp url) (not (string-empty-p url)))
+              (format "[%s](<%s>)"
+                      label
+                      (replace-regexp-in-string ">" "%3E" url t t))
+            (format "(%s unavailable)" label))))
+      references)
+     " ")))
+
+(defun agent-shell-codex-app-server--citation-prefix-length (text)
+  "Return the length of TEXT's suffix that begins a citation delimiter."
+  (let ((maximum (min (length text)
+                      (1- (length agent-shell-codex-app-server--citation-open)))))
+    (or (seq-find
+         (lambda (size)
+           (string= (substring text (- (length text) size))
+                    (substring agent-shell-codex-app-server--citation-open
+                               0 size)))
+         (number-sequence maximum 1 -1))
+        0)))
+
+(defun agent-shell-codex-app-server--resolve-citation-text (client item-id text
+                                                                   &optional finish)
+  "Resolve Codex web citations in streamed TEXT for CLIENT and ITEM-ID.
+
+Incomplete delimiters are buffered across deltas.  When FINISH is non-nil,
+return any incomplete trailing text unchanged and discard the buffer."
+  (let* ((buffers
+          (agent-shell-codex-app-server--state-table client :citation-buffers))
+         (input (concat (or (gethash item-id buffers) "") text))
+         (position 0)
+         pieces
+         done)
+    (remhash item-id buffers)
+    (while (not done)
+      (if-let* ((start (string-match
+                        (regexp-quote agent-shell-codex-app-server--citation-open)
+                        input position)))
+          (progn
+            (push (substring input position start) pieces)
+            (let ((body-start (+ start
+                                 (length agent-shell-codex-app-server--citation-open))))
+              (if-let* ((close (string-match
+                                (regexp-quote
+                                 agent-shell-codex-app-server--citation-close)
+                                input body-start)))
+                  (progn
+                    (push (agent-shell-codex-app-server--citation-replacement
+                           client
+                           (substring input body-start close))
+                          pieces)
+                    (setq position (+ close
+                                      (length
+                                       agent-shell-codex-app-server--citation-close))))
+                (if finish
+                    (push (substring input start) pieces)
+                  (puthash item-id (substring input start) buffers))
+                (setq done t))))
+        (let* ((remaining (substring input position))
+               (prefix-length
+                (unless finish
+                  (agent-shell-codex-app-server--citation-prefix-length remaining))))
+          (if (and prefix-length (> prefix-length 0))
+              (progn
+                (push (substring remaining 0 (- (length remaining) prefix-length))
+                      pieces)
+                (puthash item-id
+                         (substring remaining (- (length remaining) prefix-length))
+                         buffers))
+            (push remaining pieces))
+          (setq done t))))
+    (apply #'concat (nreverse pieces))))
+
 (defun agent-shell-codex-app-server--dispatch-agent-message (client text)
   "Dispatch agent message TEXT from CLIENT as an ACP update."
   (unless (string-empty-p text)
@@ -2278,11 +2433,9 @@ returns
      client
      (string-trim-right text))))
 
-(defun agent-shell-codex-app-server--handle-agent-message-delta (client params)
-  "Translate an agent message delta in PARAMS for CLIENT."
-  (let* ((item-id (map-elt params 'itemId))
-         (delta (or (map-elt params 'delta) ""))
-         (pending (map-elt client :pending-agent-message)))
+(defun agent-shell-codex-app-server--handle-agent-message-text (client item-id text)
+  "Dispatch resolved agent message TEXT for CLIENT and ITEM-ID."
+  (let ((pending (map-elt client :pending-agent-message)))
     (when (and pending
                (not (equal item-id (map-elt pending :item-id))))
       (agent-shell-codex-app-server--flush-pending-agent-message client)
@@ -2292,13 +2445,40 @@ returns
       (map-put! client :pending-agent-message nil)
       (agent-shell-codex-app-server--dispatch-agent-message
        client
-       (concat (map-elt pending :text) delta)))
-     ((agent-shell-codex-app-server--markdown-headings-only-p delta)
+       (concat (map-elt pending :text) text)))
+     ((agent-shell-codex-app-server--markdown-headings-only-p text)
       (map-put! client :pending-agent-message
                 `((:item-id . ,item-id)
-                  (:text . ,delta))))
+                  (:text . ,text))))
      (t
-      (agent-shell-codex-app-server--dispatch-agent-message client delta)))))
+      (agent-shell-codex-app-server--dispatch-agent-message client text)))))
+
+(defun agent-shell-codex-app-server--handle-agent-message-delta (client params)
+  "Translate an agent message delta in PARAMS for CLIENT."
+  (let* ((item-id (map-elt params 'itemId))
+         (delta (or (map-elt params 'delta) ""))
+         (resolved (agent-shell-codex-app-server--resolve-citation-text
+                    client item-id delta)))
+    (agent-shell-codex-app-server--handle-agent-message-text
+     client item-id resolved)))
+
+(defun agent-shell-codex-app-server--flush-agent-message-citations (client item-id)
+  "Flush buffered citations for CLIENT's agent message ITEM-ID."
+  (agent-shell-codex-app-server--handle-agent-message-text
+   client
+   item-id
+   (agent-shell-codex-app-server--resolve-citation-text
+    client item-id "" t)))
+
+(defun agent-shell-codex-app-server--flush-all-agent-message-citations (client)
+  "Flush all buffered agent message citations for CLIENT."
+  (let (item-ids)
+    (maphash (lambda (item-id _text)
+               (push item-id item-ids))
+             (agent-shell-codex-app-server--state-table client :citation-buffers))
+    (dolist (item-id (nreverse item-ids))
+      (agent-shell-codex-app-server--flush-agent-message-citations
+       client item-id))))
 
 (defun agent-shell-codex-app-server--turn-bound-notification-method-p (method)
   "Return non-nil when METHOD is scoped to a single app-server turn."
@@ -2509,14 +2689,22 @@ returns
               (agent-shell-codex-app-server--translate-tool-notification
                "tool_call_update" client item status))))))
       ("item/completed"
-       (agent-shell-codex-app-server--flush-pending-agent-message client)
        (let ((item (map-nested-elt notification '(params item))))
+         (when (equal (map-elt item 'type) "agentMessage")
+           (agent-shell-codex-app-server--flush-agent-message-citations
+            client
+            (map-elt item 'id)))
+         (agent-shell-codex-app-server--flush-pending-agent-message client)
          (cond
           ((and (equal (map-elt item 'type) "agentMessage")
                 (equal (map-elt item 'delivery) "async"))
            (agent-shell-codex-app-server--dispatch-agent-message
             client
-            (or (map-elt item 'text) ""))
+            (agent-shell-codex-app-server--resolve-citation-text
+             client
+             (map-elt item 'id)
+             (or (map-elt item 'text) "")
+             t))
            (agent-shell-codex-app-server--show-async-questions client item))
           ((equal (map-elt item 'type) "plan")
            (agent-shell-codex-app-server--dispatch-agent-message
@@ -2528,6 +2716,9 @@ returns
                      "subAgentActivity" "webSearch" "imageView" "sleep"
                      "imageGeneration"))
            (let ((item-id (map-elt item 'id)))
+             (when (equal (map-elt item 'type) "webSearch")
+               (agent-shell-codex-app-server--record-web-search-results
+                client item))
              (agent-shell-codex-app-server--clear-pending-permissions-for-tool-call
               client item-id)
              (if-let* ((output (map-elt item 'aggregatedOutput)))
@@ -2547,6 +2738,7 @@ returns
                    t))
                (agent-shell-codex-app-server--clear-tool-item client item-id)))))))
       ("turn/completed"
+       (agent-shell-codex-app-server--flush-all-agent-message-citations client)
        (agent-shell-codex-app-server--flush-pending-agent-message client)
        (let* ((turn (map-nested-elt notification '(params turn)))
               (turn-id (map-elt turn 'id))
@@ -2776,10 +2968,11 @@ returns
 (cl-defun agent-shell-codex-app-server--fetch-models-page (&key client
                                                                 cursor
                                                                 collected
-                                                                on-success)
+                                                                on-success
+                                                                on-failure)
   "Fetch one `model/list' page for CLIENT.
 
-Reuse CURSOR, COLLECTED, and ON-SUCCESS until all pages are loaded."
+Reuse CURSOR, COLLECTED, ON-SUCCESS, and ON-FAILURE until all pages are loaded."
   (agent-shell-codex-app-server--send-rpc-request
    :client client
    :method "model/list"
@@ -2795,21 +2988,102 @@ Reuse CURSOR, COLLECTED, and ON-SUCCESS until all pages are loaded."
                         :client client
                         :cursor next-cursor
                         :collected all-models
-                        :on-success on-success)
+                        :on-success on-success
+                        :on-failure on-failure)
                      (map-put! client :available-models all-models)
                      (when on-success
                        (funcall on-success)))))
-   :on-failure (lambda (_error _raw)
-                 (map-put! client :available-models (or collected '()))
-                 (when on-success
-                   (funcall on-success)))))
+   :on-failure (lambda (error raw)
+                 (if on-failure
+                     (funcall on-failure error raw)
+                   (when on-success
+                     (funcall on-success))))))
 
-(defun agent-shell-codex-app-server--fetch-models (client on-success)
-  "Refresh model metadata for CLIENT, then call ON-SUCCESS."
+(defun agent-shell-codex-app-server--fetch-models (client on-success &optional on-failure)
+  "Refresh model metadata for CLIENT, then call ON-SUCCESS.
+Call ON-FAILURE when supplied if `model/list' fails."
   (agent-shell-codex-app-server--fetch-models-page
    :client client
    :collected nil
-   :on-success on-success))
+   :on-success on-success
+   :on-failure on-failure))
+
+(defun agent-shell-codex-app-server--session-models (models)
+  "Translate app-server MODELS into Agent Shell session models."
+  (mapcar (lambda (model)
+            `((:model-id . ,(agent-shell-codex-app-server--model-id model))
+              (:name . ,(or (map-elt model 'displayName)
+                            (map-elt model 'model)
+                            (map-elt model 'id)))
+              (:description . ,(map-elt model 'description))))
+          models))
+
+(defun agent-shell-codex-app-server--session-modes (client)
+  "Return CLIENT's reasoning modes in Agent Shell session form."
+  (let ((modes (agent-shell-codex-app-server--translate-modes
+                client
+                (map-elt client :current-model-id)
+                (map-elt client :reasoning-effort))))
+    (cons (map-elt modes 'currentModeId)
+          (mapcar (lambda (mode)
+                    `((:id . ,(map-elt mode 'id))
+                      (:name . ,(map-elt mode 'name))
+                      (:description . ,(map-elt mode 'description))))
+                  (map-elt modes 'availableModes)))))
+
+(defun agent-shell-codex-app-server--synchronize-models (client)
+  "Synchronize CLIENT's model metadata with its live Agent Shell session."
+  (when-let* ((buffer (map-elt client :context-buffer))
+              (_ (buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (when (and (boundp 'agent-shell--state)
+                 (eq (map-elt agent-shell--state :client) client)
+                 (map-elt agent-shell--state :session))
+        (let* ((session (map-elt agent-shell--state :session))
+               (modes (agent-shell-codex-app-server--session-modes client)))
+          (map-put! session :models
+                    (agent-shell-codex-app-server--session-models
+                     (map-elt client :available-models)))
+          (map-put! session :mode-id (car modes))
+          (map-put! session :modes (cdr modes))
+          (when (and (derived-mode-p 'agent-shell-mode)
+                     (fboundp 'agent-shell--update-header-and-mode-line))
+            (agent-shell--update-header-and-mode-line)))))))
+
+;;;###autoload
+(defun agent-shell-codex-app-server-refresh-models ()
+  "Refresh model choices from the running Codex app-server."
+  (interactive)
+  (let* ((state (and (boundp 'agent-shell--state) agent-shell--state))
+         (client (map-elt state :client)))
+    (unless (and (agent-shell-codex-app-server-client-p client)
+                 (agent-shell-codex-app-server--client-started-p client))
+      (user-error "Use this command in a running Codex app-server shell"))
+    (when (map-elt client :reconnecting)
+      (user-error "Wait for the current reconnect to finish"))
+    (let ((old-model-ids
+           (mapcar #'agent-shell-codex-app-server--model-id
+                   (map-elt client :available-models))))
+      (message "Refreshing Codex models...")
+      (agent-shell-codex-app-server--fetch-models
+       client
+       (lambda ()
+         (agent-shell-codex-app-server--synchronize-models client)
+         (let* ((model-ids
+                 (mapcar #'agent-shell-codex-app-server--model-id
+                         (map-elt client :available-models)))
+                (added (seq-remove (lambda (model-id)
+                                     (member model-id old-model-ids))
+                                   model-ids)))
+           (message "Codex models refreshed: %d available%s"
+                    (length model-ids)
+                    (if added
+                        (format "; added %s" (string-join added ", "))
+                      "; no new models"))))
+       (lambda (error _raw)
+         (message "Could not refresh Codex models: %s"
+                  (or (agent-shell-codex-app-server--error-message-text error)
+                      "Unexpected app-server error")))))))
 
 (defun agent-shell-codex-app-server--thread-params (client cwd)
   "Return common thread parameters for CLIENT using CWD."
@@ -3298,7 +3572,7 @@ Background terminals and browser connections may not survive reconnecting."
             :sandbox-mode (map-elt old :sandbox-mode)
             :connection-type (map-elt old :connection-type)))
           (cwd default-directory)
-          finished timer failure retired)
+          finished timer failure retired resume-with-replacement)
       (unless (assq :reconnecting old)
         (nconc old (list (cons :reconnecting nil))))
       (map-put! old :reconnecting t)
@@ -3320,6 +3594,47 @@ Background terminals and browser connections may not survive reconnecting."
       (setq timer (run-at-time 60 nil failure "Timed out after 60 seconds"))
       (map-put! replacement :current-model-id (map-elt old :current-model-id))
       (map-put! replacement :reasoning-effort (map-elt old :reasoning-effort))
+      (setq resume-with-replacement
+            (lambda ()
+              (unless finished
+                (if (not (and (buffer-live-p shell)
+                              (eq (buffer-local-value 'agent-shell--state shell) state)
+                              (eq (map-elt state :client) old)
+                              (not (map-elt old :active-turn-id))
+                              (not (map-elt old :pending-prompt))
+                              (not (map-elt state :active-requests))
+                              (= (hash-table-count (map-elt old :pending-requests)) 0)))
+                    (funcall failure "Session became busy or changed")
+                  (setq retired t)
+                  (agent-shell-codex-app-server-shutdown :client old)
+                  (map-put! replacement :thread-id thread)
+                  (map-put! replacement :reconnecting t)
+                  (dolist (key '(:notification-handlers :request-handlers :error-handlers))
+                    (map-put! replacement key (map-elt old key)))
+                  (map-put! state :client replacement)
+                  (agent-shell-codex-app-server--synchronize-models replacement)
+                  (agent-shell-codex-app-server--send-rpc-request
+                   :client replacement :buffer shell :method "thread/resume"
+                   :params (append `((threadId . ,thread) (excludeTurns . t))
+                                   (agent-shell-codex-app-server--thread-params replacement cwd))
+                   :on-failure failure
+                   :on-success
+                   (lambda (result)
+                     (unless finished
+                       (if (not (and (buffer-live-p shell)
+                                     (eq (buffer-local-value 'agent-shell--state shell) state)
+                                     (eq (map-elt state :client) replacement)
+                                     (not (map-elt replacement :active-turn-id))
+                                     (not (map-elt replacement :pending-prompt))
+                                     (not (map-elt state :active-requests))
+                                     (= (hash-table-count (map-elt old :pending-requests)) 0)
+                                     (equal (map-nested-elt result '(thread id)) thread)))
+                           (funcall failure "Session changed while resuming")
+                         (setq finished t)
+                         (cancel-timer timer)
+                         (map-put! replacement :reconnecting nil)
+                         (map-put! old :reconnecting nil)
+                         (message "Codex reconnected using current credentials; conversation preserved")))))))))
       (condition-case err
           (agent-shell-codex-app-server-send-request
            :client replacement :buffer shell
@@ -3328,44 +3643,8 @@ Background terminals and browser connections may not survive reconnecting."
            :on-success
            (lambda (_result)
              (unless finished
-               (if (not (and (buffer-live-p shell)
-                             (eq (buffer-local-value 'agent-shell--state shell) state)
-                             (eq (map-elt state :client) old)
-                             (not (map-elt old :active-turn-id))
-                             (not (map-elt old :pending-prompt))
-                             (not (map-elt state :active-requests))
-                             (= (hash-table-count (map-elt old :pending-requests)) 0)))
-                   (funcall failure "Session became busy or changed")
-                 (setq retired t)
-                 (agent-shell-codex-app-server-shutdown :client old)
-                 (map-put! replacement :thread-id thread)
-                 (map-put! replacement :reconnecting t)
-                 (dolist (key '(:notification-handlers :request-handlers :error-handlers
-                                :available-models))
-                   (map-put! replacement key (map-elt old key)))
-                 (map-put! state :client replacement)
-               (agent-shell-codex-app-server--send-rpc-request
-                :client replacement :buffer shell :method "thread/resume"
-                :params (append `((threadId . ,thread) (excludeTurns . t))
-                                (agent-shell-codex-app-server--thread-params replacement cwd))
-                :on-failure failure
-                :on-success
-                (lambda (result)
-                  (unless finished
-                    (if (not (and (buffer-live-p shell)
-                                  (eq (buffer-local-value 'agent-shell--state shell) state)
-                                  (eq (map-elt state :client) replacement)
-                                  (not (map-elt replacement :active-turn-id))
-                                  (not (map-elt replacement :pending-prompt))
-                                  (not (map-elt state :active-requests))
-                                  (= (hash-table-count (map-elt old :pending-requests)) 0)
-                                  (equal (map-nested-elt result '(thread id)) thread)))
-                        (funcall failure "Session changed while resuming")
-                      (setq finished t)
-                      (cancel-timer timer)
-                      (map-put! replacement :reconnecting nil)
-                      (map-put! old :reconnecting nil)
-                      (message "Codex reconnected using current credentials; conversation preserved")))))))))
+               (agent-shell-codex-app-server--fetch-models
+                replacement resume-with-replacement failure))))
         (error (funcall failure (error-message-string err)))))))
 
 (cl-defun agent-shell-codex-app-server-shutdown (&key client)
