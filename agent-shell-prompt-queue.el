@@ -477,18 +477,35 @@ user typed can put it back."
 
 Read PROMPT from the minibuffer and act on the current project's shell,
 resolving it via `agent-shell--shell-buffer' so this works even when
-invoked outside a shell buffer.  If the shell is busy and the agent has
-an active-turn handler, deliver PROMPT immediately through that handler.
-Otherwise, add PROMPT to the pending queue.  With an idle shell, submit
-it immediately.  Queued prompts are automatically sent when the current
-prompt completes, merged into a single prompt unless
-`agent-shell-prompt-queue-merge' is nil.  When it is cancelled instead,
-you are asked whether to continue with them.
+invoked outside a shell buffer.  If the shell is busy, add PROMPT to the
+pending prompts queue.  Otherwise, submit it immediately.  Queued prompts
+are automatically sent when the current prompt completes, merged into a
+single prompt unless `agent-shell-prompt-queue-merge' is nil.  When it is
+cancelled instead, you are asked whether to continue with them.
 
-Ignores `agent-shell-busy-submit-default-function'.  If active-turn input
-cannot be delivered, preserve PROMPT in the pending queue.
+Always queues, ignoring `agent-shell-busy-submit-default-function'.
 
-See also `agent-shell-prompt-steer' for agents supporting ACP steering.
+To hand PROMPT to the agent mid-turn instead of waiting, see
+`agent-shell-prompt-send-immediately' or `agent-shell-prompt-steer'.
+
+While reading, @ completes project files and / completes available agent
+commands when the agent has reported them."
+  (interactive
+   (list (with-current-buffer (agent-shell--shell-buffer :no-create t)
+           (agent-shell--prompt-queue-read))))
+  (with-current-buffer (agent-shell--shell-buffer :no-create t)
+    (if (shell-maker-busy)
+        (agent-shell--prompt-queue-enqueue :prompt prompt)
+      (agent-shell--insert-to-shell-buffer :text prompt :submit t :no-focus t))))
+
+(defun agent-shell-prompt-send-immediately (prompt)
+  "Send PROMPT immediately to the current project's agent.
+
+Read PROMPT from the minibuffer, including outside a shell buffer.
+When busy, use the agent's active-turn handler.  If the handler cannot
+deliver the input, preserve PROMPT in the pending queue.  When idle,
+submit PROMPT as a new turn.  For example, sending \"Use the other file\"
+while Codex is working delivers that instruction through `turn/steer'.
 
 While reading, @ completes project files and / completes available agent
 commands when the agent has reported them."

@@ -1444,7 +1444,22 @@ straight to the shell."
         (funcall fallback)
         (should (equal queued '("preserve me")))))))
 
-(ert-deftest agent-shell-prompt-queue-delivers-active-input-test ()
+(ert-deftest agent-shell-prompt-queue-preserves-explicit-queue-test ()
+  "Explicit queueing must not invoke an adapter's active-turn handler."
+  (let ((agent-shell--state
+         '((:agent-config . ((:busy-prompt-handler
+                             . (lambda (_event)
+                                 (ert-fail "Queue invoked active-turn input")))))))
+        queued)
+    (cl-letf (((symbol-function 'agent-shell--shell-buffer)
+               (lambda (&rest _) (current-buffer)))
+              ((symbol-function 'shell-maker-busy) (lambda (&rest _) t))
+              ((symbol-function 'agent-shell--prompt-queue-enqueue)
+               (lambda (&rest args) (setq queued (plist-get args :prompt)))))
+      (agent-shell-prompt-queue "next turn")
+      (should (equal queued "next turn")))))
+
+(ert-deftest agent-shell-prompt-send-immediately-delivers-active-input-test ()
   "Busy input should reach the adapter immediately or queue if unclaimed."
   (dolist (outcome '(accepted declined unsupported idle))
     (let (received queued submitted)
@@ -1464,15 +1479,15 @@ straight to the shell."
                    (lambda (&rest args) (setq queued (plist-get args :prompt))))
                   ((symbol-function 'agent-shell--insert-to-shell-buffer)
                    (lambda (&rest args) (setq submitted (plist-get args :text)))))
-          (agent-shell-prompt-queue "deliver now")
+          (agent-shell-prompt-send-immediately "deliver now")
           (should (equal received
                          (when (memq outcome '(accepted declined)) "deliver now")))
           (should (equal queued
                          (when (memq outcome '(declined unsupported)) "deliver now")))
           (should (equal submitted (when (eq outcome 'idle) "deliver now"))))))))
 
-(ert-deftest agent-shell-prompt-queue-sends-codex-steer-test ()
-  "Queue command input should send a Codex steer before the turn ends."
+(ert-deftest agent-shell-prompt-send-immediately-sends-codex-steer-test ()
+  "Immediate input should send a Codex steer before the turn ends."
   (require 'agent-shell-codex-app-server)
   (with-temp-buffer
     (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
@@ -1496,7 +1511,7 @@ straight to the shell."
                  (lambda (&rest args) (setq request args)))
                 ((symbol-function 'agent-shell--prompt-queue-enqueue)
                  (lambda (&rest args) (push (plist-get args :prompt) queued))))
-        (agent-shell-prompt-queue "deliver now")
+        (agent-shell-prompt-send-immediately "deliver now")
         (should (equal (plist-get request :method) "turn/steer"))
         (should (equal (map-elt (plist-get request :params) 'expectedTurnId)
                        "turn-1"))
@@ -9742,14 +9757,14 @@ reaching item navigation."
     (goto-char (match-beginning 0))
     (should (get-text-property (point) 'keymap))))
 
-(ert-deftest agent-shell-prompt-queue-key-binding-test ()
-  "Bind the prompt queue in shell and viewport buffers."
+(ert-deftest agent-shell-prompt-send-immediately-key-binding-test ()
+  "Bind immediate input in shell and viewport buffers."
   (should (eq (lookup-key agent-shell-mode-map (kbd "C-c /"))
-              #'agent-shell-prompt-queue))
+              #'agent-shell-prompt-send-immediately))
   (should (eq (lookup-key agent-shell-viewport-edit-mode-map (kbd "C-c /"))
-              #'agent-shell-viewport-prompt-queue))
+              #'agent-shell-viewport-prompt-send-immediately))
   (should (eq (lookup-key agent-shell-viewport-view-mode-map (kbd "C-c /"))
-              #'agent-shell-viewport-prompt-queue)))
+              #'agent-shell-viewport-prompt-send-immediately)))
 
 (ert-deftest agent-shell-backward-up-item-returns-to-a-table-s-first-cell ()
   (agent-shell-tests--with-rendered-shell

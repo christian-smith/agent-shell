@@ -66,6 +66,7 @@
 (declare-function agent-shell-interrupt-confirmed-p "agent-shell")
 (declare-function agent-shell-open-transcript "agent-shell")
 (declare-function agent-shell-prompt-queue "agent-shell-prompt-queue")
+(declare-function agent-shell-prompt-send-immediately "agent-shell-prompt-queue")
 (declare-function agent-shell--busy-submit "agent-shell-prompt-queue")
 (defvar agent-shell-busy-submit-default-function)
 (defvar agent-shell-busy-submit-override-function)
@@ -1225,6 +1226,17 @@ buffer from the snapshot and switch to edit mode."
     (with-current-buffer shell-buffer
       (call-interactively #'agent-shell-prompt-queue))))
 
+(defun agent-shell-viewport-prompt-send-immediately ()
+  "Read and send a prompt immediately to the viewport's agent."
+  (declare (modes agent-shell-viewport-view-mode
+                  agent-shell-viewport-edit-mode))
+  (interactive)
+  (agent-shell-viewport--ensure-buffer)
+  (let ((shell-buffer (or (agent-shell--current-shell)
+                          (user-error "Not in an agent-shell buffer"))))
+    (with-current-buffer shell-buffer
+      (call-interactively #'agent-shell-prompt-send-immediately))))
+
 (defun agent-shell-viewport-prompt-queue-resume ()
   "Resume processing pending prompts in the queue."
   (declare (modes agent-shell-viewport-view-mode
@@ -1309,7 +1321,7 @@ VIEWPORT-BUFFER is the viewport buffer to check."
     (define-key map (kbd "C-c C-v") #'agent-shell-viewport-set-session-model)
     (define-key map (kbd "C-c C-t") #'agent-shell-viewport-set-session-thought-level)
     (define-key map (kbd "C-c C-o") #'agent-shell-other-buffer)
-    (define-key map (kbd "C-c /") #'agent-shell-viewport-prompt-queue)
+    (define-key map (kbd "C-c /") #'agent-shell-viewport-prompt-send-immediately)
     (define-key map (kbd "M-p") #'agent-shell-viewport-previous-history)
     (define-key map (kbd "M-n") #'agent-shell-viewport-next-history)
     (define-key map (kbd "M-r") #'agent-shell-viewport-search-history)
@@ -1344,7 +1356,7 @@ VIEWPORT-BUFFER is the viewport buffer to check."
     (define-key map (kbd "0") #'agent-shell-markdown-image-scale-reset)
     (define-key map (kbd "q") #'bury-buffer)
     (define-key map (kbd "C-<tab>") #'agent-shell-viewport-cycle-session-mode)
-    (define-key map (kbd "C-c /") #'agent-shell-viewport-prompt-queue)
+    (define-key map (kbd "C-c /") #'agent-shell-viewport-prompt-send-immediately)
     (define-key map (kbd "v") #'agent-shell-viewport-set-session-model)
     (define-key map (kbd "m") #'agent-shell-viewport-reply-more)
     (define-key map (kbd "a") #'agent-shell-viewport-reply-again)

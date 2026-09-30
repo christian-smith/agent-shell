@@ -2732,7 +2732,7 @@ mouse selection or a kill where mark > point) is normalized."
   "C-c C-v" #'agent-shell-set-session-model
   "C-c C-t" #'agent-shell-set-session-thought-level
   "C-c C-o" #'agent-shell-other-buffer
-  "C-c /" #'agent-shell-prompt-queue
+  "C-c /" #'agent-shell-prompt-send-immediately
   "C-c C-s" #'agent-shell-set-session-config-option
   "<remap> <yank>" #'agent-shell-yank-dwim
   "<remap> <comint-send-input>" #'agent-shell-submit
