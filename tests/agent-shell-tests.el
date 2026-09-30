@@ -1444,20 +1444,66 @@ straight to the shell."
         (funcall fallback)
         (should (equal queued '("preserve me")))))))
 
-(ert-deftest agent-shell-prompt-queue-preserves-explicit-queue-test ()
-  "Explicit queueing must not invoke an adapter's active-turn handler."
-  (let ((agent-shell--state
-         '((:agent-config . ((:busy-prompt-handler
-                             . (lambda (_event)
-                                 (ert-fail "Queue invoked active-turn input")))))))
-        queued)
-    (cl-letf (((symbol-function 'agent-shell--shell-buffer)
-               (lambda (&rest _) (current-buffer)))
-              ((symbol-function 'shell-maker-busy) (lambda (&rest _) t))
-              ((symbol-function 'agent-shell--prompt-queue-enqueue)
-               (lambda (&rest args) (setq queued (plist-get args :prompt)))))
-      (agent-shell-prompt-queue "next turn")
-      (should (equal queued "next turn")))))
+(ert-deftest agent-shell-prompt-queue-delivers-active-input-test ()
+  "Busy input should reach the adapter immediately or queue if unclaimed."
+  (dolist (outcome '(accepted declined unsupported idle))
+    (let (received queued submitted)
+      (let ((agent-shell--state
+             `((:agent-config
+                . ((:busy-prompt-handler
+                    . ,(unless (eq outcome 'unsupported)
+                         (lambda (event)
+                           (setq received (map-elt event :prompt))
+                           (eq outcome 'accepted)))))))))
+        (cl-letf (((symbol-function 'agent-shell--shell-buffer)
+                   (lambda (&rest _) (current-buffer)))
+                  ((symbol-function 'shell-maker-busy)
+                   (lambda (&rest _) (not (eq outcome 'idle))))
+                  ((symbol-function 'agent-shell--echo) #'ignore)
+                  ((symbol-function 'agent-shell--prompt-queue-enqueue)
+                   (lambda (&rest args) (setq queued (plist-get args :prompt))))
+                  ((symbol-function 'agent-shell--insert-to-shell-buffer)
+                   (lambda (&rest args) (setq submitted (plist-get args :text)))))
+          (agent-shell-prompt-queue "deliver now")
+          (should (equal received
+                         (when (memq outcome '(accepted declined)) "deliver now")))
+          (should (equal queued
+                         (when (memq outcome '(declined unsupported)) "deliver now")))
+          (should (equal submitted (when (eq outcome 'idle) "deliver now"))))))))
+
+(ert-deftest agent-shell-prompt-queue-sends-codex-steer-test ()
+  "Queue command input should send a Codex steer before the turn ends."
+  (require 'agent-shell-codex-app-server)
+  (with-temp-buffer
+    (let* ((client (agent-shell-codex-app-server-make-client :command "sh"))
+           (agent-shell--state
+            `((:buffer . ,(current-buffer))
+              (:client . ,client)
+              (:agent-config
+               . ((:busy-prompt-handler
+                   . agent-shell-codex-app-server-handle-busy-prompt)))))
+           request queued)
+      (map-put! client :thread-id "thread-1")
+      (map-put! client :active-turn-id "turn-1")
+      (map-put! client :pending-prompt '((:turn-id . "turn-1")))
+      (cl-letf (((symbol-function 'agent-shell--shell-buffer)
+                 (lambda (&rest _) (current-buffer)))
+                ((symbol-function 'shell-maker-busy) (lambda (&rest _) t))
+                ((symbol-function 'agent-shell--echo) #'ignore)
+                ((symbol-function 'agent-shell--build-content-blocks)
+                 (lambda (prompt) `(((type . "text") (text . ,prompt)))))
+                ((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+                 (lambda (&rest args) (setq request args)))
+                ((symbol-function 'agent-shell--prompt-queue-enqueue)
+                 (lambda (&rest args) (push (plist-get args :prompt) queued))))
+        (agent-shell-prompt-queue "deliver now")
+        (should (equal (plist-get request :method) "turn/steer"))
+        (should (equal (map-elt (plist-get request :params) 'expectedTurnId)
+                       "turn-1"))
+        (should-not queued)
+        (funcall (plist-get request :on-failure) nil nil)
+        (funcall (plist-get request :on-failure) nil nil)
+        (should (equal queued '("deliver now")))))))
 
 (ert-deftest agent-shell-adapter-steering-controls-test ()
   "Explicit and busy-submit steering should both use the adapter handler."
