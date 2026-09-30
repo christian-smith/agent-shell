@@ -56,6 +56,8 @@ and :questions contains the server's question titles and options.")
 
 (declare-function agent-shell--build-content-blocks "agent-shell")
 (declare-function agent-shell-prompt-queue "agent-shell-prompt-queue")
+(declare-function agent-shell-busy-submit-steer "agent-shell-prompt-queue")
+(declare-function shell-maker-busy "shell-maker")
 (declare-function agent-shell--update-header-and-mode-line "agent-shell")
 
 (defconst agent-shell-codex-app-server--tool-output-display-limit
@@ -1333,7 +1335,7 @@ Use MODEL-ID and EFFORT to resolve the current mode."
 (defun agent-shell-codex-app-server--answer-async-questions (context)
   "Collect and submit answers for the question CONTEXT.
 
-Answers use the originating shell's prompt queue, not a server RPC reply."
+Answers steer the originating shell's active turn or submit a new prompt."
   (let ((client (map-elt context :client))
         (enable-recursive-minibuffers t))
     (unless (eq (map-elt context :status) 'pending)
@@ -1360,7 +1362,9 @@ Answers use the originating shell's prompt queue, not a server RPC reply."
             (user-error "The originating Codex session is no longer available"))
           (require 'agent-shell-prompt-queue)
           (with-current-buffer shell
-            (agent-shell-prompt-queue (string-join answers "\n\n")))
+            (if (shell-maker-busy)
+                (agent-shell-busy-submit-steer (string-join answers "\n\n"))
+              (agent-shell-prompt-queue (string-join answers "\n\n"))))
           (setf (map-elt context :status) 'answered)
           (when (buffer-live-p (map-elt context :buffer))
             (kill-buffer (map-elt context :buffer))))

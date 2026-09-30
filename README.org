@@ -146,7 +146,7 @@ For OpenAI's Codex, install [[https://github.com/agentclientprotocol/codex-acp][
 
 Alternatively, install the [[https://developers.openai.com/codex/cli/][Codex CLI]] and use its native app-server transport. Set =(setq agent-shell-openai-codex-transport 'app-server)= before starting Codex. The default remains =acp=.
 
-Codex can ask asynchronous questions while continuing its work. These appear in a separate question buffer without taking focus. Select =Answer= to choose suggested answers or enter your own text. Answers use the prompt queue: they steer a running turn or start a new turn when Codex is idle. Dismissing a question does not interrupt Codex.
+Codex can ask asynchronous questions while continuing its work. These appear in a separate question buffer without taking focus. Select =Answer= to choose suggested answers or enter your own text. Answers steer a running turn or start a new turn when Codex is idle. Dismissing a question does not interrupt Codex.
 
 To disable command approvals and sandboxing for new or resumed Codex app-server sessions, set =(setq agent-shell-openai-codex-app-server-yolo-mode t)=. This allows commands and file changes outside the workspace without asking. The default is nil; running sessions and other agents are unchanged. MCP forms and user-input questions can still require a response.
 
@@ -887,6 +887,8 @@ The viewport's compose buffer is available either way, and submitting from it mi
 A prompt sent while the agent is working is queued and submitted once the turn ends.  Prompts queued during the same turn are merged into a single prompt, separated by blank lines (set =agent-shell-prompt-queue-merge= to nil to send them one turn each).  Cancelling the turn asks whether to continue with the queued prompts.  Agents that support steering can take it into the turn already running instead, so a wrong direction can be corrected without waiting for it to finish.  Steering is an ACP extension (=_session/steering=) rather than part of the spec, advertised by the agent at initialization: the Claude and Codex packages implement it, other agents keep queueing.
 
 Steering is always explicit.  =M-x agent-shell-prompt-queue= queues, as it always has.  =M-x agent-shell-prompt-steer= steers the running turn, and errors when the agent cannot steer.  With no turn running there is nothing to steer into, so it submits the prompt instead.  When the agent declines a steer, the running turn is interrupted and the shell says so, rather than letting the agent carry on in a direction you believe you already corrected.
+
+Agent configurations with a =:busy-prompt-handler= use their transport-specific active-turn input through the same steering controls. These handlers preserve input in the next-turn queue if submission races with turn completion. Codex's native app-server transport uses =turn/steer= through this path. Explicit queueing and ordinary busy submission continue to queue by default.
 
 What the agent does with the steered prompt is up to the agent: Claude interrupts what it is generating and responds to it, while Codex finishes the message in flight first.
 

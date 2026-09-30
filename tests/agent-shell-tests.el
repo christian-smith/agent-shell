@@ -1444,6 +1444,57 @@ straight to the shell."
         (funcall fallback)
         (should (equal queued '("preserve me")))))))
 
+(ert-deftest agent-shell-prompt-queue-preserves-explicit-queue-test ()
+  "Explicit queueing must not invoke an adapter's active-turn handler."
+  (let ((agent-shell--state
+         '((:agent-config . ((:busy-prompt-handler
+                             . (lambda (_event)
+                                 (ert-fail "Queue invoked active-turn input")))))))
+        queued)
+    (cl-letf (((symbol-function 'agent-shell--shell-buffer)
+               (lambda (&rest _) (current-buffer)))
+              ((symbol-function 'shell-maker-busy) (lambda (&rest _) t))
+              ((symbol-function 'agent-shell--prompt-queue-enqueue)
+               (lambda (&rest args) (setq queued (plist-get args :prompt)))))
+      (agent-shell-prompt-queue "next turn")
+      (should (equal queued "next turn")))))
+
+(ert-deftest agent-shell-adapter-steering-controls-test ()
+  "Explicit and busy-submit steering should both use the adapter handler."
+  (let (received fallback queued)
+    (let ((agent-shell--state
+           `((:agent-config
+              . ((:busy-prompt-handler
+                  . ,(lambda (event)
+                       (push (map-elt event :prompt) received)
+                       (setq fallback (map-elt event :fallback))
+                       t)))))))
+      (cl-letf (((symbol-function 'agent-shell--shell-buffer)
+                 (lambda (&rest _) (current-buffer)))
+                ((symbol-function 'shell-maker-busy) (lambda (&rest _) t))
+                ((symbol-function 'agent-shell-status) (lambda (&rest _) 'busy))
+                ((symbol-function 'agent-shell--echo) #'ignore)
+                ((symbol-function 'agent-shell-experimental--send-steering)
+                 (lambda (&rest _) (ert-fail "Adapter sent an ACP steer")))
+                ((symbol-function 'agent-shell--prompt-queue-enqueue)
+                 (lambda (&rest args) (push (plist-get args :prompt) queued))))
+        (should (agent-shell-steering-supported-p))
+        (agent-shell-prompt-steer "explicit steer")
+        (agent-shell-busy-submit-steer "busy steer")
+        (should (equal received '("busy steer" "explicit steer")))
+        (funcall fallback)
+        (funcall fallback)
+        (should (equal queued '("busy steer")))))))
+
+(ert-deftest agent-shell-adapter-steering-refusal-preserves-input-test ()
+  "An adapter refusal should signal so submitting callers retain their input."
+  (let ((agent-shell--state
+         '((:agent-config . ((:busy-prompt-handler . (lambda (_event) nil)))))))
+    (cl-letf (((symbol-function 'agent-shell-experimental--send-steering)
+               (lambda (&rest _) (ert-fail "Adapter refusal sent an ACP steer"))))
+      (should-error (agent-shell-busy-submit-steer "keep this draft")
+                    :type 'user-error))))
+
 (ert-deftest agent-shell--prompt-queue-setup-yasnippet-test ()
   "Queued prompts inherit the source shell's Yasnippet tables."
   (let ((shell (generate-new-buffer " *agent-shell-yasnippet-test*"))
