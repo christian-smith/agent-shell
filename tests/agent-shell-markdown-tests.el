@@ -90,6 +90,42 @@
   (should (equal (agent-shell-markdown-tests--roundtrip "a \\* b\n")
                  "a \\* b\n")))
 
+(ert-deftest agent-shell-markdown-render-without-change-hooks ()
+  "Rendering preserves output fields without invoking editing hooks."
+  (with-temp-buffer
+    (insert "prompt> **bold** \\* tail\nafter")
+    (let ((start (copy-marker 9))
+          (end (copy-marker 25))
+          (changes nil)
+          (before-changes nil)
+          (inhibit-field-text-motion nil))
+      (put-text-property start end 'field 'output)
+      (add-hook 'before-change-functions
+                (lambda (&rest args) (push args before-changes)) nil t)
+      (add-hook 'after-change-functions
+                (lambda (&rest args) (push args changes)) nil t)
+      (save-restriction
+        (narrow-to-region start end)
+        (agent-shell-markdown-replace-markup :render-images nil)
+        (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                       "bold * tail"))
+        (should (eq (get-text-property start 'field) 'output))
+        (should-not (text-property-not-all start end 'fontified t))
+        (should (equal (agent-shell-markdown-reconstruct start end)
+                       "**bold** \\* tail")))
+      (should-not before-changes)
+      (should-not changes)
+      (should-not inhibit-field-text-motion)
+      (should-not inhibit-modification-hooks)
+      (should (equal (buffer-substring-no-properties (point-min) start)
+                     "prompt> "))
+      (should (equal (buffer-substring-no-properties end (point-max))
+                     "\nafter"))
+      (goto-char (point-max))
+      (insert "!")
+      (should before-changes)
+      (should changes))))
+
 (ert-deftest agent-shell-markdown-escape-left-literal-inside-code ()
   ;; Inside a code span a backslash is literal, so `\\*' must NOT be
   ;; unescaped (and the `*' stays plain, not a delimiter).

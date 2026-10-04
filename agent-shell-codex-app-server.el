@@ -55,8 +55,7 @@ and :questions contains the server's question titles and options.")
   "Seconds to debounce streamed tool output updates.")
 
 (declare-function agent-shell--build-content-blocks "agent-shell")
-(declare-function agent-shell-prompt-queue "agent-shell-prompt-queue")
-(declare-function agent-shell-busy-submit-steer "agent-shell-prompt-queue")
+(declare-function agent-shell--insert-to-shell-buffer "agent-shell")
 (declare-function shell-maker-busy "shell-maker")
 (declare-function agent-shell--update-header-and-mode-line "agent-shell")
 
@@ -1335,9 +1334,11 @@ Use MODEL-ID and EFFORT to resolve the current mode."
 (defun agent-shell-codex-app-server--answer-async-questions (context)
   "Collect and submit answers for the question CONTEXT.
 
-Answers steer the originating shell's active turn or submit a new prompt."
+Answers steer the originating shell's active turn or submit a new prompt.
+If Codex rejects a steer, keep the question available for retry."
   (let ((client (map-elt context :client))
-        (enable-recursive-minibuffers t))
+        (enable-recursive-minibuffers t)
+        submitted)
     (unless (eq (map-elt context :status) 'pending)
       (user-error "These questions are already answered or dismissed"))
     (setf (map-elt context :status) 'answering)
@@ -1360,16 +1361,36 @@ Answers steer the originating shell's active turn or submit a new prompt."
                        (with-current-buffer shell
                          (eq (map-elt agent-shell--state :client) client)))
             (user-error "The originating Codex session is no longer available"))
-          (require 'agent-shell-prompt-queue)
           (with-current-buffer shell
             (if (shell-maker-busy)
-                (agent-shell-busy-submit-steer (string-join answers "\n\n"))
-              (agent-shell-prompt-queue (string-join answers "\n\n"))))
-          (setf (map-elt context :status) 'answered)
-          (when (buffer-live-p (map-elt context :buffer))
-            (kill-buffer (map-elt context :buffer))))
-      (when (eq (map-elt context :status) 'answering)
+                (unless
+                    (agent-shell-codex-app-server-handle-busy-prompt
+                     `((:state . ,agent-shell--state)
+                       (:prompt . ,(string-join answers "\n\n"))
+                       (:on-success
+                        . ,(lambda ()
+                             (agent-shell-codex-app-server--finish-async-answer context)))
+                       (:fallback
+                        . ,(lambda ()
+                             (when (eq (map-elt context :status) 'answering)
+                               (setf (map-elt context :status) 'pending)
+                               (message "Codex could not accept the answer; please retry"))))))
+                  (user-error "No active Codex turn can accept the answer"))
+              (agent-shell--insert-to-shell-buffer
+               :text (string-join answers "\n\n") :shell-buffer shell
+               :submit t :no-focus t)
+              (agent-shell-codex-app-server--finish-async-answer context)))
+          (setq submitted t))
+      (when (and (not submitted)
+                 (eq (map-elt context :status) 'answering))
         (setf (map-elt context :status) 'pending)))))
+
+(defun agent-shell-codex-app-server--finish-async-answer (context)
+  "Mark CONTEXT answered and close its question buffer after delivery."
+  (when (eq (map-elt context :status) 'answering)
+    (setf (map-elt context :status) 'answered)
+    (when (buffer-live-p (map-elt context :buffer))
+      (kill-buffer (map-elt context :buffer)))))
 
 (defun agent-shell-codex-app-server--show-async-questions (client item)
   "Display ITEM's questions for CLIENT without blocking notification handling."
@@ -1719,7 +1740,8 @@ newest-first chunks to fill the display limit."
 
 EVENT contains `:state', `:prompt', and `:fallback'.  Return non-nil
 after claiming the prompt.  A failed or stale steer calls the fallback
-so Agent Shell submits the text as a later turn instead of losing it."
+so Agent Shell submits the text as a later turn instead of losing it.
+An optional `:on-success' callback runs after Codex accepts the input."
   (when-let* ((state (map-elt event :state))
               (client (map-elt state :client))
               ((agent-shell-codex-app-server-client-p client))
@@ -1740,7 +1762,9 @@ so Agent Shell submits the text as a later turn instead of losing it."
                                 (agent-shell--build-content-blocks prompt)))
                      (expectedTurnId . ,turn-id))
            :on-success (lambda (result)
-                         (unless (equal (map-elt result 'turnId) turn-id)
+                         (if (equal (map-elt result 'turnId) turn-id)
+                             (when-let* ((on-success (map-elt event :on-success)))
+                               (funcall on-success))
                            (funcall fallback)))
            :on-failure (lambda (&rest _)
                          (funcall fallback)))

@@ -425,7 +425,10 @@ block is left as literal text."
       (with-silent-modifications
         (remove-text-properties (point-min) (point-max)
                                 '(agent-shell-markdown-watermark nil))))
-    (let ((watermark (agent-shell-markdown--watermark-start))
+    ;; The renderer owns fontification; per-edit hooks rescan output fields.
+    (let ((inhibit-modification-hooks t)
+          (inhibit-field-text-motion t)
+          (watermark (agent-shell-markdown--watermark-start))
           (external-watermarks)
           (context)
           (source-blocks)
