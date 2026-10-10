@@ -15,6 +15,57 @@
 (defvar agent-shell-a2a-tests--sent nil)
 (defvar agent-shell-a2a-tests--interrupted nil)
 
+(ert-deftest agent-shell-a2a-direct-load-provides-delivery-guards-test ()
+  "Exercise gateway-only loading without the core preloading its dependencies."
+  ;; Test the gateway file this session loaded, not another copy on `load-path'.
+  (let ((directory (file-name-directory (symbol-file 'agent-shell-a2a--steer 'defun))))
+    (with-temp-buffer
+      (let ((status
+             (call-process
+              (expand-file-name invocation-name invocation-directory) nil t nil
+              "--batch" "-Q" "-L" directory "--eval"
+              (prin1-to-string
+               '(progn
+                  (setq native-comp-enable-subr-trampolines nil
+                        load-prefer-newer t)
+                  (require 'agent-shell-a2a)
+                  ;; A preloaded core would mask a missing gateway dependency.
+                  (when (featurep 'agent-shell)
+                    (error "Gateway-only load also loaded the core"))
+                  (with-temp-buffer
+                    (let* ((state `((:buffer . ,(current-buffer)) (:session . ((:id . "test")))
+                                    (:elicitations . nil) (:agent-config . nil)))
+                           (agent `((:buffer . ,(current-buffer)) (:session-id . "test")
+                                    (:context-id . "context") (:turn-sequence . 0)
+                                    (:active-task . nil) (:delivery . nil) (:receipts . nil)))
+                           called)
+                      (map-put! state :agent-config
+                                `((:busy-prompt-handler . ,(lambda (event)
+                                                            (setq called t)
+                                                            (funcall (map-elt event :on-success)) t))))
+                      (cl-letf (((symbol-function 'agent-shell--state) (lambda () state))
+                                ((symbol-function 'shell-maker-busy) (lambda () t))
+                                ((symbol-function 'agent-shell--permission-pending-p) (lambda () nil))
+                                ((symbol-function 'agent-shell-a2a--nonce) (lambda () "receipt"))
+                                ((symbol-function 'agent-shell-a2a--reply-receipt) #'ignore))
+                        (agent-shell-a2a--steer agent nil '((messageId . "test")) "Coordination"
+                                               nil 1 nil nil)
+                        (unless (and called
+                                     (eq (map-elt (car (map-elt agent :receipts)) :state) 'accepted))
+                          (error "Gateway-only delivery was not accepted"))
+                        (setq called nil)
+                        (map-put! state :elicitations '((7 . ((:status . pending)))))
+                        (condition-case err
+                            (progn
+                              (agent-shell-a2a--steer agent nil '((messageId . "blocked")) "Coordination"
+                                                     nil 1 nil nil)
+                              (error "Pending form did not block delivery"))
+                          (agent-shell-a2a-error
+                           (unless (and (= (nth 1 err) -32004) (not called))
+                             (error "Pending form bypassed the delivery guard")))))))
+                  (princ "Gateway-only delivery and pending-form guard passed"))))))
+        (ert-info ((buffer-string)) (should (equal status 0)))))))
+
 (defmacro agent-shell-a2a-tests--with-gateway (&rest body)
   "Run BODY with a loopback gateway and an in-memory exposed shell."
   (declare (indent 0) (debug t))

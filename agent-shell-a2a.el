@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'agent-shell-elicitation)
 (require 'json)
 (require 'map)
 (require 'seq)
@@ -22,7 +23,6 @@
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
 (declare-function agent-shell--prompt-input-start "agent-shell-prompt")
 (declare-function agent-shell--permission-pending-p "agent-shell")
-(declare-function agent-shell-elicitation--pending-p "agent-shell-elicitation")
 (declare-function agent-shell-viewport--buffer "agent-shell-viewport")
 (declare-function agent-shell-interrupt "agent-shell")
 (declare-function iso8601-parse "iso8601")
