@@ -55,6 +55,7 @@ and :questions contains the server's question titles and options.")
   "Seconds to debounce streamed tool output updates.")
 
 (declare-function agent-shell--build-content-blocks "agent-shell")
+(declare-function agent-shell--active-input-accepted "agent-shell")
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
 (declare-function shell-maker-busy "shell-maker")
 (declare-function agent-shell--update-header-and-mode-line "agent-shell")
@@ -1367,6 +1368,7 @@ If Codex rejects a steer, keep the question available for retry."
                     (agent-shell-codex-app-server-handle-busy-prompt
                      `((:state . ,agent-shell--state)
                        (:prompt . ,(string-join answers "\n\n"))
+                       (:source . codex-question)
                        (:on-success
                         . ,(lambda ()
                              (agent-shell-codex-app-server--finish-async-answer context)))
@@ -1763,8 +1765,10 @@ An optional `:on-success' callback runs after Codex accepts the input."
                      (expectedTurnId . ,turn-id))
            :on-success (lambda (result)
                          (if (equal (map-elt result 'turnId) turn-id)
-                             (when-let* ((on-success (map-elt event :on-success)))
-                               (funcall on-success))
+                             (progn
+                               (agent-shell--active-input-accepted event)
+                               (when-let* ((on-success (map-elt event :on-success)))
+                                 (funcall on-success)))
                            (funcall fallback)))
            :on-failure (lambda (&rest _)
                          (funcall fallback)))

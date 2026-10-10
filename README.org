@@ -943,6 +943,39 @@ configurations across every agent that you use.
            (url . "https://mcp.notion.com/mcp"))))
 #+end_src
 
+*** Local agent-to-agent communication (A2A)
+
+Agent Shell can expose existing shell conversations through an opt-in, loopback-only [[https://a2a-protocol.org/latest/specification/][A2A 1.0]] JSON-RPC gateway. It works with local A2A clients, including another agent using HTTP tools. Loading Agent Shell does not start a listener or expose any buffers. The gateway requires =openssl= to generate its bearer credential and identifiers securely.
+
+1. In each initialized shell you want to make available, run =M-x agent-shell-a2a-expose=. The first invocation starts a listener on an unused IPv4 loopback port; subsequent invocations expose additional shells on that listener. To choose a port first, evaluate =(agent-shell-a2a-start 9099)=.
+2. Run =M-x agent-shell-a2a-copy-connection-info= and share the copied directory URL and bearer credential only with trusted local agents. The credential grants access to every exposed shell, including its existing conversation context and tool permissions. Do not put it in committed files or public prompts.
+3. Fetch =GET /agents= with the bearer credential to discover exposed agents. Each entry has a base URL; fetch =BASE_URL/.well-known/agent-card.json=, which also requires the bearer credential, for its Agent Card and use the advertised =BASE_URL/rpc= interface.
+4. Run =M-x agent-shell-a2a-unexpose= in a shell to withdraw it, or =M-x agent-shell-a2a-stop= to stop the gateway. Neither action interrupts the agents or stops Emacs. Restarting the gateway generates a new credential and discards its in-memory task history.
+
+All RPC requests require =Content-Type: application/json=, =Authorization: Bearer TOKEN=, and =A2A-Version: 1.0=. Requests without that version header are not treated as A2A 1.0. Browser-origin requests and non-loopback Host headers are rejected. The gateway supports =SendMessage=, =SendStreamingMessage=, =GetTask=, =ListTasks=, =CancelTask=, and =SubscribeToTask=. Only =text/plain= parts are accepted; push notifications, extended cards, remote network exposure, and an outbound remote-agent client are not supported.
+
+For example, send this JSON-RPC body to the advertised RPC URL:
+
+#+begin_src json
+{
+  "jsonrpc": "2.0",
+  "id": "inspect-parser",
+  "method": "SendMessage",
+  "params": {
+    "message": {
+      "messageId": "unique-message-id",
+      "role": "ROLE_USER",
+      "parts": [{"text": "Inspect the parser and summarize the edge cases."}]
+    },
+    "configuration": {"returnImmediately": true}
+  }
+}
+#+end_src
+
+=SendMessage= normally waits asynchronously until the task finishes or needs input; =returnImmediately: true= instead returns its task ID for polling with =GetTask=. Results are text artifacts. Streaming calls use Server-Sent Events containing task snapshots, artifact deltas, and status updates; a stream stays open while the task needs input and closes when the task completes, fails, or is canceled. Disconnecting a client does not cancel the task. =CancelTask= sends the agent's normal protocol cancellation only for the caller's A2A-owned task, not for unrelated work, and replies after the turn has actually ended. Connections have a five-minute deadline, so callers waiting on longer turns should poll with =GetTask= or resubscribe with =SubscribeToTask=. Task output is limited to one megabyte; a task that exceeds it fails, while the agent's turn continues in Emacs. A task accepts at most 32 caller messages totaling one megabyte of JSON, including metadata. The gateway retains the latest 128 tasks per exposed buffer in memory, and fewer when their text exceeds about 32 megabytes.
+
+Each exposed buffer represents one shared conversation context, not a new isolated agent per task. New tasks are refused while the shell has unrelated work, queued prompts, or unsubmitted draft input. A follow-up =SendMessage= carrying the active task's =taskId= is delivered immediately through the Codex, Claude, or Grok adapter's active-turn handler and acknowledged only after delivery is accepted. Refused or stale input is not silently queued. Human input during an A2A-owned turn ends that task's output forwarding so it cannot collect the response to a different prompt. Permissions and forms remain interactive in Emacs: the task reports =TASK_STATE_INPUT_REQUIRED= until they are answered there, and A2A text messages do not grant permission. A Codex question is forwarded in the task's status message; either the caller's follow-up message or an answer given in Emacs resumes the task. Messages whose whole text is =help=, =clear=, or =config= are refused because the shell would handle them locally instead of sending them to the agent. Expose a dedicated shell when other agents need exclusive access, and withdraw and expose it again after changing its session.
+
 *** Monitoring events
 
 You can subscribe to shell events (turn complete, tool calls, config changes, etc.) via =agent-shell-subscribe-to=. See its docstring (=C-h f agent-shell-subscribe-to=) for the full list of events and their data.

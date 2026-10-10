@@ -84,6 +84,7 @@
 (require 'agent-shell-goose)
 (require 'agent-shell-heartbeat)
 (require 'agent-shell-active-message)
+(require 'agent-shell-a2a)
 (require 'agent-shell-hermes)
 (require 'agent-shell-junie)
 (require 'agent-shell-kimi)
@@ -7122,7 +7123,9 @@ Session events:
   `session-restored'      - Reloaded session fully replayed and settled
   `input-submitted'       - User submitted input to the agent
     :data contains :prompt (the text sent to the agent, with any
-    truncated regions expanded).  Emitted for a prompt steered input also.
+    truncated regions expanded).  Emitted for accepted active-turn input also.
+    Adapter active-turn input may include :source identifying its caller,
+    for example `a2a' or `codex-question'.
   `idle'                  - Agent idle for variable `agent-shell-idle-timeout'
     seconds :data contains :idle-event and :buffer
 
@@ -7280,6 +7283,20 @@ DATA is an optional alist of event-specific data."
               (funcall (map-elt sub :on-event) event-alist)
             (error
              (message "agent-shell: subscriber for %s errored: %S" event err))))))))
+
+(defun agent-shell--active-input-accepted (event)
+  "Emit accepted active-turn input from adapter EVENT.
+EVENT carries :state, :prompt, and an optional :source for task ownership."
+  (when-let* ((state (map-elt event :state))
+              (buffer (map-elt state :buffer))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'agent-shell-mode)
+        (let ((agent-shell--state state))
+          (agent-shell--emit-event
+           :event 'input-submitted
+           :data `((:prompt . ,(map-elt event :prompt))
+                   (:source . ,(map-elt event :source)))))))))
 
 (cl-defun agent-shell--start-idle-timer (&key event data)
   "Start the idle timer for EVENT with DATA.
