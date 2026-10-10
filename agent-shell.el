@@ -11811,7 +11811,8 @@ returns:
 
 Also recreates the file and its directory if deleted mid-session, as
 long as the shell's working directory still exists.  On failure,
-disable the transcript for this shell and return nil."
+return nil but retain the path for the next write attempt.  Disable
+the transcript only when the working directory no longer exists."
   (unless (derived-mode-p 'agent-shell-mode)
     (user-error "Not in an agent-shell buffer"))
   (when-let* ((filepath agent-shell--transcript-file)
@@ -11838,9 +11839,13 @@ disable the transcript for this shell and return nil."
             (message "Created %s"
                      (agent-shell--shorten-paths filepath t)))
         (error
-         (setq-local agent-shell--transcript-file nil)
-         (message "Transcript disabled: %s" (error-message-string err)))))
-    agent-shell--transcript-file))
+         (unless (file-directory-p (agent-shell-cwd))
+           (setq-local agent-shell--transcript-file nil))
+         (message "Transcript %s: %s"
+                  (if agent-shell--transcript-file "write failed; will retry" "disabled")
+                  (error-message-string err)))))
+    (when (file-exists-p filepath)
+      agent-shell--transcript-file)))
 
 (defun agent-shell--indent-markdown-headers (text)
   "Indent markdown headers in TEXT by 2 levels for transcript hierarchy.
@@ -11887,8 +11892,8 @@ For example:
     (condition-case err
         (write-region text nil file-path t 'no-message)
       (error
-       (setq-local agent-shell--transcript-file nil)
-       (message "Transcript disabled: %s" (error-message-string err))))))
+       (message "Transcript write failed; will retry: %s"
+                (error-message-string err))))))
 
 (cl-defun agent-shell--separate-transcript-after-agent-message (&key last-entry-type file-path)
   "Append a blank-line separator to the transcript at FILE-PATH.

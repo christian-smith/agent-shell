@@ -4467,6 +4467,34 @@ Text/navigable files open in Emacs; binary files open externally."
       (delete-file binary)
       (delete-directory dir))))
 
+(ert-deftest agent-shell-markdown--parse-local-link-rejects-network-links-test ()
+  "Link hints must not probe web URLs or remote files."
+  (require 'tramp)
+  (cl-letf (((symbol-function 'file-exists-p)
+             (lambda (path)
+               (ert-fail (format "Unexpected file access: %s" path)))))
+    (dolist (url '("https://api.serendb.com/health"
+                   "https://api.serendb.com/affiliates/employee-referral-program"
+                   "https://example.com/source.el#L10"
+                   "http://example.com"
+                   "HTTPS://example.com"
+                   "ftp://example.com/file.el"
+                   "mailto:person@example.com"
+                   "/ssh:example.com:/tmp/file.el"
+                   "file:///ssh:example.com:/tmp/file.el"))
+      (should-not (agent-shell-markdown--parse-local-link url))
+      (should (equal (agent-shell-markdown--link-verb url nil)
+                     "open in browser")))))
+
+(ert-deftest agent-shell-markdown--parse-local-link-preserves-drive-paths-test ()
+  "Drive-letter file paths remain local links."
+  (cl-letf (((symbol-function 'file-exists-p) (lambda (_path) t)))
+    (dolist (path '("C:/src/file.el" "/C:/src/file.el"))
+      (should (equal (agent-shell-markdown--parse-local-link (concat path ":10:5"))
+                     (list (cons :file (expand-file-name path))
+                           (cons :line-start 10)
+                           (cons :column 5)))))))
+
 (ert-deftest agent-shell-markdown--parse-local-link-lines-test ()
   "Test `agent-shell-markdown--parse-local-link' reads lines and ranges.
 

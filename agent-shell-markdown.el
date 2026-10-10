@@ -4934,9 +4934,15 @@ For example, with the file part abbreviated to F:
                       eos)
                   url)
                  (cons (match-string 1 url) (match-string 2 url)))
+                ((and (string-match-p
+                       (rx bos alpha (* (any alnum "+.-")) ":") url)
+                      (not (string-match-p
+                            (rx bos (optional "/") alpha ":/") url)))
+                 nil)
                 ((not (string-empty-p url))
                  (cons url nil))))
-              (filepath (expand-file-name (car match))))
+              (filepath (expand-file-name (car match)))
+              ((not (file-remote-p filepath))))
     (when (file-exists-p filepath)
       (cons (cons :file filepath)
             (when (cdr match)
