@@ -62,9 +62,6 @@
 (defconst agent-shell-a2a--max-retained-tasks 128
   "Maximum tasks retained per exposed shell.")
 
-(defconst agent-shell-a2a--max-pending-tasks 16
-  "Maximum queued A2A tasks per exposed shell.")
-
 (defconst agent-shell-a2a--max-retained-bytes (* 32 1024 1024)
   "Approximate retained task text per exposed shell, in bytes.
 Unfinished tasks are always retained.")
@@ -254,7 +251,6 @@ HEADERS is a string of CRLF-terminated lines, for example
   "End AGENT's TASK in terminal STATE with optional TEXT and release the shell."
   (agent-shell-a2a--set-state task state text)
   (agent-shell-a2a--finish-cancel task)
-  (map-put! agent :pending-tasks (delq task (map-elt agent :pending-tasks)))
   (when (eq task (map-elt agent :active-task))
     (map-put! agent :active-task nil)))
 
@@ -271,6 +267,7 @@ HEADERS is a string of CRLF-terminated lines, for example
 The shell must be idle with a live, empty prompt, no local queued
 prompts, and no viewport compose draft."
   (and (not (map-elt agent :active-task))
+       (not (map-elt agent :delivery))
        (not (map-elt agent :dispatching))
        (not (shell-maker-busy))
        (not (map-elt (agent-shell--state) :pending-prompts))
@@ -280,7 +277,6 @@ prompts, and no viewport compose draft."
 
 (defun agent-shell-a2a--dispatch-task (agent task)
   "Submit AGENT's TASK through the normal prompt pipeline."
-  (map-put! agent :pending-tasks (delq task (map-elt agent :pending-tasks)))
   (map-put! agent :active-task task)
   (map-put! agent :dispatching t)
   (map-put! agent :dispatched nil)
@@ -299,32 +295,9 @@ prompts, and no viewport compose draft."
 
 (defun agent-shell-a2a--withdraw-tasks (agent text)
   "Fail every unfinished task in AGENT with status TEXT."
-  (dolist (task (append (map-elt agent :pending-tasks)
-                       (when (map-elt agent :active-task) (list (map-elt agent :active-task)))))
+  (agent-shell-a2a--fail-delivery agent text)
+  (when-let* ((task (map-elt agent :active-task)))
     (agent-shell-a2a--end-task agent task 'failed text)))
-
-(defun agent-shell-a2a--pump ()
-  "Deliver one queued task per ready shell, preserving unrelated work and drafts.
-Runs from the gateway's one-second timer.  A shell whose readiness check
-fails has its queued tasks failed, so one shell cannot repeat the error."
-  (dolist (agent (copy-sequence (map-elt agent-shell-a2a--server :agents)))
-    (when (map-elt agent :pending-tasks)
-      (condition-case err
-          (if (not (buffer-live-p (map-elt agent :buffer)))
-              (progn
-                (agent-shell-a2a--withdraw-tasks agent "Shell was closed")
-                (agent-shell-a2a--forget agent))
-            (with-current-buffer (map-elt agent :buffer)
-              (cond
-               ((not (equal (map-nested-elt (agent-shell--state) '(:session :id))
-                            (map-elt agent :session-id)))
-                (agent-shell-a2a--withdraw-tasks agent "Shell session changed before queued delivery"))
-               ((agent-shell-a2a--ready-p agent)
-                (agent-shell-a2a--dispatch-task agent (car (map-elt agent :pending-tasks)))))))
-        (error
-         (dolist (task (copy-sequence (map-elt agent :pending-tasks)))
-           (agent-shell-a2a--end-task agent task 'failed
-                                      (format "Queued delivery failed: %s" (error-message-string err)))))))))
 
 (defun agent-shell-a2a--open-questions (task)
   "Return TASK's forwarded Codex question contexts still awaiting an answer."
@@ -363,6 +336,11 @@ TASKS is an alist of task IDs to tasks.  Unfinished tasks are kept."
 (defun agent-shell-a2a--on-event (agent event)
   "Route a shell EVENT to AGENT's owned task only.
 Runs in AGENT's shell buffer, as `agent-shell--emit-event' does."
+  (when (or (memq (map-elt event :event) '(turn-complete error clean-up))
+            (not (equal (map-nested-elt (agent-shell--state) '(:session :id))
+                        (map-elt agent :session-id))))
+    (map-put! agent :turn-sequence (1+ (map-elt agent :turn-sequence)))
+    (agent-shell-a2a--fail-delivery agent "Turn or session changed before input acknowledgement"))
   (when-let* ((task (map-elt agent :active-task)))
     (if (not (equal (map-nested-elt (agent-shell--state) '(:session :id))
                     (map-elt agent :session-id)))
@@ -484,8 +462,7 @@ For example, (agent-shell-a2a-start 9099).  No shells are exposed yet."
                        :coding 'binary :filter #'agent-shell-a2a--filter
                        :sentinel #'agent-shell-a2a--sentinel
                        :log #'agent-shell-a2a--accept))
-                (cons :token token) (cons :agents nil) (cons :connections nil)
-                (cons :pump-timer (run-at-time 1 1 #'agent-shell-a2a--pump)))))
+                (cons :token token) (cons :agents nil) (cons :connections nil))))
   (add-hook 'agent-shell-codex-app-server-question-hook #'agent-shell-a2a--on-codex-question)
   (message "A2A gateway listening on 127.0.0.1:%s; expose a shell with agent-shell-a2a-expose"
            (process-contact (map-elt agent-shell-a2a--server :listener) :service)))
@@ -515,7 +492,8 @@ Return its base URL.  For example, (agent-shell-a2a-expose (current-buffer))."
                           (cons :buffer buffer)
                           (cons :session-id (with-current-buffer buffer
                                               (map-nested-elt (agent-shell--state) '(:session :id))))
-                          (cons :tasks nil) (cons :active-task nil) (cons :pending-tasks nil)
+                          (cons :tasks nil) (cons :active-task nil)
+                          (cons :receipts nil) (cons :delivery nil) (cons :turn-sequence 0)
                           (cons :dispatching nil) (cons :dispatched nil)
                           (cons :subscription nil)))
         (map-put! agent :subscription
@@ -548,7 +526,6 @@ Return its base URL.  For example, (agent-shell-a2a-expose (current-buffer))."
   "Stop the gateway without stopping Emacs or interrupting any agent turns."
   (interactive)
   (when agent-shell-a2a--server
-    (cancel-timer (map-elt agent-shell-a2a--server :pump-timer))
     (dolist (agent (copy-sequence (map-elt agent-shell-a2a--server :agents)))
       (agent-shell-a2a-unexpose (map-elt agent :buffer)))
     (dolist (connection (copy-sequence (map-elt agent-shell-a2a--server :connections)))
@@ -604,13 +581,6 @@ Count its JSON size twice, since a task keeps the message as sent and
 normalized.  For example, a 40-byte message counts as 80 bytes."
   (* 2 (string-bytes (json-serialize message :null-object nil :false-object :false))))
 
-(defun agent-shell-a2a--delivery (message)
-  "Convert MESSAGE's optional agentShellDelivery metadata to a checked policy."
-  (pcase (map-nested-elt message '(metadata agentShellDelivery))
-    ((or 'nil "immediate") 'immediate)
-    ("queue" 'queue)
-    (_ (agent-shell-a2a--reject -32602 "agentShellDelivery must be immediate or queue"))))
-
 (defun agent-shell-a2a--reply-task (process id task configuration streaming)
   "Reply to PROCESS with ID for TASK using CONFIGURATION and STREAMING."
   (cond
@@ -625,6 +595,77 @@ normalized.  For example, a 40-byte message counts as 80 bytes."
                         (:history-length . ,(agent-shell-a2a--history-length configuration)))
                       (map-elt task :waiters))))))
 
+(defun agent-shell-a2a--reply-receipt (receipt process id streaming &optional configuration)
+  "Reply on PROCESS with ID from RECEIPT, optionally STREAMING.
+CONFIGURATION controls owned task replies.
+Pending receipts retain callers until the adapter acknowledges delivery."
+  (pcase (map-elt receipt :state)
+    ('pending
+     (map-put! receipt :waiters
+               (cons (list (cons :process process) (cons :id id) (cons :streaming streaming)
+                           (cons :configuration configuration))
+                     (seq-filter (lambda (entry) (process-live-p (map-elt entry :process)))
+                                 (map-elt receipt :waiters)))))
+    ('failed (agent-shell-a2a--rpc-error process id -32004 (map-elt receipt :error)))
+    ('accepted
+     (cond
+      ((map-elt receipt :task)
+       (agent-shell-a2a--reply-task process id (map-elt receipt :task) configuration streaming))
+      (streaming
+       (progn
+         (agent-shell-a2a--write
+          process "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n")
+         (agent-shell-a2a--sse process id (map-elt receipt :result))
+         (agent-shell-a2a--close process)))
+      (t (agent-shell-a2a--rpc-result process id (map-elt receipt :result)))))))
+
+(defun agent-shell-a2a--settle-delivery (agent receipt state &optional result text)
+  "Set AGENT's pending RECEIPT to STATE with RESULT or error TEXT."
+  (unless (memq state '(accepted failed))
+    (error "Unknown A2A delivery outcome: %s" state))
+  (when (eq (map-elt receipt :state) 'pending)
+    (map-put! receipt :state state)
+    (map-put! receipt :result result)
+    (map-put! receipt :error text)
+    (when (eq receipt (map-elt agent :delivery))
+      (map-put! agent :delivery nil))
+    (dolist (entry (map-elt receipt :waiters))
+      (agent-shell-a2a--reply-receipt receipt (map-elt entry :process)
+                                      (map-elt entry :id) (map-elt entry :streaming)
+                                      (map-elt entry :configuration)))
+    (map-put! receipt :waiters nil)
+    (when (map-elt receipt :task)
+      (when (eq state 'accepted)
+        ;; Accepted owned input is already retained in the task's requests.
+        (map-put! agent :receipts (delq receipt (map-elt agent :receipts))))
+      (map-put! receipt :task nil))
+    (map-put! agent :receipts (agent-shell-a2a--retain-receipts (map-elt agent :receipts)))))
+
+(defun agent-shell-a2a--fail-delivery (agent text)
+  "Reject AGENT's unacknowledged delivery with TEXT."
+  (when-let* ((receipt (map-elt agent :delivery)))
+    (agent-shell-a2a--settle-delivery
+     agent receipt 'failed nil
+     (concat text "; delivery is unconfirmed, do not resend with a new messageId"))))
+
+(defun agent-shell-a2a--retain-receipts (receipts)
+  "Return newest-first RECEIPTS within count and byte budgets.
+A pending receipt is always kept so exact retries share its acknowledgement."
+  (let ((count 0) (bytes 0))
+    (seq-filter
+     (lambda (receipt)
+       (setq count (1+ count) bytes (+ bytes (map-elt receipt :bytes)))
+       (or (eq (map-elt receipt :state) 'pending)
+           (and (<= count agent-shell-a2a--max-retained-tasks)
+                (<= bytes agent-shell-a2a--max-retained-bytes))))
+     receipts)))
+
+(defun agent-shell-a2a--delivery-receipt (agent)
+  "Return AGENT's wire receipt for input accepted into an unowned turn."
+  `((message . ((messageId . ,(agent-shell-a2a--nonce)) (role . "ROLE_AGENT")
+                (contextId . ,(map-elt agent :context-id))
+                (parts . [((text . "Delivered to the active turn. Reply through the sender's callback instructions; this receipt does not collect turn output."))])))))
+
 (defun agent-shell-a2a--send (agent params process id streaming)
   "Send PARAMS to AGENT and reply on PROCESS with ID, optionally STREAMING."
   (let* ((message (map-elt params 'message))
@@ -632,9 +673,12 @@ normalized.  For example, a 40-byte message counts as 80 bytes."
          (configuration (map-elt params 'configuration))
          (buffer (map-elt agent :buffer))
          (task-id (agent-shell-a2a--field message 'taskId))
-         (delivery (agent-shell-a2a--delivery message))
          (task (when task-id
                  (agent-shell-a2a--find-task agent `((id . ,task-id)))))
+         (receipt (seq-find
+                   (lambda (entry)
+                     (equal (map-nested-elt entry '(:request messageId)) (map-elt message 'messageId)))
+                   (map-elt agent :receipts)))
          (duplicate (seq-find
                      (lambda (entry)
                        (seq-some (lambda (old)
@@ -655,9 +699,13 @@ normalized.  For example, a 40-byte message counts as 80 bytes."
     (when (and (agent-shell-a2a--field message 'contextId)
                (not (equal (map-elt message 'contextId) (map-elt agent :context-id))))
       (agent-shell-a2a--reject -32602 "This shell has one shared conversation context"))
-    (when (and task-id (eq delivery 'queue))
-      (agent-shell-a2a--reject -32602 "Queue delivery starts a new task; omit taskId"))
+    (when (map-contains-key (map-elt message 'metadata) 'agentShellDelivery)
+      (agent-shell-a2a--reject -32602 "Delivery policies are not supported; messages are delivered immediately"))
     (cond
+     (receipt
+      (unless (equal message (map-elt receipt :request))
+        (agent-shell-a2a--reject -32602 "messageId already used with different content"))
+      (agent-shell-a2a--reply-receipt receipt process id streaming configuration))
      (duplicate
       (unless (seq-some (lambda (old) (equal old message)) (map-elt (cdr duplicate) :requests))
         (agent-shell-a2a--reject -32602 "messageId already used with different content"))
@@ -666,81 +714,101 @@ normalized.  For example, a 40-byte message counts as 80 bytes."
       (with-current-buffer buffer
         (unless (equal (map-nested-elt (agent-shell--state) '(:session :id))
                        (map-elt agent :session-id))
+          (agent-shell-a2a--fail-delivery agent "Shell session changed")
           (agent-shell-a2a--reject -32004 "Shell session changed; withdraw and expose it again"))
         (when (string-empty-p (string-trim prompt))
           (agent-shell-a2a--reject -32602 "Message text is empty"))
         (when (member (string-trim prompt) agent-shell-a2a--reserved-inputs)
           (agent-shell-a2a--reject -32602 "Message text is a reserved local shell command"))
-        (if task
-            (agent-shell-a2a--steer agent task message prompt process id configuration streaming)
-          (when (and (eq delivery 'immediate)
-                     (or (map-elt agent :pending-tasks) (not (agent-shell-a2a--ready-p agent))))
-            (agent-shell-a2a--reject -32004 "Shell has unrelated work or draft input; use queue delivery or try when idle"))
-          (when (>= (length (map-elt agent :pending-tasks)) agent-shell-a2a--max-pending-tasks)
-            (agent-shell-a2a--reject -32004 "A2A task queue is full"))
+        (cond
+         ((or task (shell-maker-busy))
+          (agent-shell-a2a--steer agent task message prompt process id configuration streaming))
+         (t
+          (unless (agent-shell-a2a--ready-p agent)
+            (agent-shell-a2a--reject -32004 "Idle shell has draft input, queued prompts, or no live prompt"))
           (setq task (list (cons :id (agent-shell-a2a--nonce))
                            (cons :context-id (map-elt agent :context-id))
                            (cons :state 'submitted) (cons :timestamp (agent-shell-a2a--timestamp))
                            (cons :output "") (cons :status-message nil) (cons :status-count 0)
                            (cons :history nil) (cons :requests (list message))
                            (cons :input-bytes (agent-shell-a2a--message-bytes message))
-                           (cons :waiters nil) (cons :streams nil) (cons :steering nil)
+                           (cons :waiters nil) (cons :streams nil)
                            (cons :questions nil)
                            (cons :canceling nil) (cons :cancel-waiters nil)))
           (map-put! task :history (list (agent-shell-a2a--normalize-message task message)))
           (map-put! agent :tasks (agent-shell-a2a--retain (cons (cons (map-elt task :id) task)
-                                                               (map-elt agent :tasks))))
-          (if (and (not (map-elt agent :pending-tasks)) (agent-shell-a2a--ready-p agent))
-              (agent-shell-a2a--dispatch-task agent task)
-            (map-put! agent :pending-tasks (append (map-elt agent :pending-tasks) (list task)))
-            (agent-shell-a2a--set-state task 'submitted "Queued; waiting for an idle shell without draft input"))
-          (agent-shell-a2a--reply-task process id task configuration streaming)))))))
+                                                                (map-elt agent :tasks))))
+          (agent-shell-a2a--dispatch-task agent task)
+          (agent-shell-a2a--reply-task process id task configuration streaming))))))))
 
 (defun agent-shell-a2a--steer (agent task message prompt process id configuration streaming)
-  "Deliver MESSAGE and PROMPT into AGENT's owned TASK, replying on PROCESS with ID.
-CONFIGURATION controls blocking and history.  STREAMING selects SSE."
-  (unless (and (eq task (map-elt agent :active-task))
-               (not (agent-shell-a2a--terminal-p task)) (shell-maker-busy)
-               (not (map-elt task :steering)))
-    (agent-shell-a2a--reject -32004 "Task is not accepting active-turn input"))
+  "Deliver MESSAGE and PROMPT into AGENT's active turn, optionally owning TASK.
+Reply on PROCESS with ID after acceptance.  CONFIGURATION controls history.
+STREAMING selects SSE.  An unowned turn returns a message, not task output."
+  (unless (and (shell-maker-busy)
+               (not (map-elt agent :delivery))
+               (or (not task)
+                   (and (eq task (map-elt agent :active-task))
+                        (not (agent-shell-a2a--terminal-p task)))))
+    (agent-shell-a2a--reject -32004 "Turn is not accepting active input"))
+  ;; `C-c /' asks a human before steering here; a caller cannot answer.
+  (when (or (agent-shell--permission-pending-p) (agent-shell-elicitation--pending-p))
+    (agent-shell-a2a--reject -32004 "Recipient awaits a permission or form answer in Emacs"))
   (let ((handler (map-nested-elt (agent-shell--state) '(:agent-config :busy-prompt-handler)))
         (bytes (agent-shell-a2a--message-bytes message))
         (buffer (current-buffer))
-        answered)
-    (when (or (>= (length (map-elt task :requests)) agent-shell-a2a--max-task-messages)
-              (> (+ (map-elt task :input-bytes) bytes) (* 2 agent-shell-a2a--max-body)))
+        (sequence (map-elt agent :turn-sequence)))
+    (when (and task
+               (or (>= (length (map-elt task :requests)) agent-shell-a2a--max-task-messages)
+                   (> (+ (map-elt task :input-bytes) bytes) (* 2 agent-shell-a2a--max-body))))
       (agent-shell-a2a--reject -32004 "Task message limit reached"))
     (unless (functionp handler)
       (agent-shell-a2a--reject -32004 "This agent does not acknowledge active-turn input"))
-    (map-put! task :steering prompt)
-    (let ((reject (lambda ()
-                    (unless answered
-                      (setq answered t)
-                      (map-put! task :steering nil)
-                      (agent-shell-a2a--rpc-error process id -32004 "Input was not accepted into this task"))))
-          (accept (lambda ()
-                    (unless answered
-                      (setq answered t)
-                      (map-put! task :steering nil)
-                      (if (or (not (eq task (map-elt agent :active-task)))
-                              (agent-shell-a2a--terminal-p task)
-                              (not (buffer-live-p buffer)))
-                          (agent-shell-a2a--rpc-error process id -32004 "Turn ended before input acknowledgement")
+    (let* ((receipt (list (cons :request message) (cons :bytes bytes) (cons :state 'pending)
+                          (cons :task task) (cons :result nil) (cons :error nil) (cons :waiters nil)))
+           (reject (lambda ()
+                     (agent-shell-a2a--settle-delivery agent receipt 'failed nil
+                                                       "Input delivery was not confirmed; do not resend with a new messageId")))
+           (accept
+            (lambda ()
+              (when (eq (map-elt receipt :state) 'pending)
+                (if (or (not (buffer-live-p buffer))
+                        (not (eq receipt (map-elt agent :delivery)))
+                        (not (= sequence (map-elt agent :turn-sequence)))
+                        (not (with-current-buffer buffer
+                               (equal (map-nested-elt (agent-shell--state) '(:session :id))
+                                      (map-elt agent :session-id)))))
+                    (agent-shell-a2a--settle-delivery agent receipt 'failed nil
+                                                      "Input delivery was not confirmed before the turn changed; do not resend with a new messageId")
+                  ;; The turn accepted input after this task stopped forwarding
+                  ;; output, so report delivery without task ownership.
+                  (when (and task (or (not (eq task (map-elt agent :active-task)))
+                                      (agent-shell-a2a--terminal-p task)))
+                    (setq task nil)
+                    (map-put! receipt :task nil))
+                  (if task
+                      (progn
                         (map-put! task :requests (append (map-elt task :requests) (list message)))
                         (map-put! task :input-bytes (+ (map-elt task :input-bytes) bytes))
                         (map-put! task :history
                                   (append (map-elt task :history)
                                           (list (agent-shell-a2a--normalize-message task message))))
-                        ;; The caller's reply answers any forwarded Codex question.
                         (dolist (context (agent-shell-a2a--open-questions task))
                           (map-put! context :status 'answered)
                           (when (buffer-live-p (map-elt context :buffer))
                             (kill-buffer (map-elt context :buffer))))
-                        (with-current-buffer buffer
-                          (agent-shell-a2a--resume task))
-                        (agent-shell-a2a--reply-task process id task configuration streaming))))))
+                        (with-current-buffer buffer (agent-shell-a2a--resume task))
+                        (agent-shell-a2a--settle-delivery agent receipt 'accepted))
+                    (when-let* ((owned (map-elt agent :active-task)))
+                      (agent-shell-a2a--set-state owned 'failed "Shell input changed outside this A2A task"))
+                    (agent-shell-a2a--settle-delivery
+                     agent receipt 'accepted (agent-shell-a2a--delivery-receipt agent))))))))
+      (map-put! agent :delivery receipt)
+      (map-put! agent :receipts (agent-shell-a2a--retain-receipts (cons receipt (map-elt agent :receipts))))
+      (agent-shell-a2a--reply-receipt receipt process id streaming configuration)
       (condition-case nil
-          (unless (funcall handler `((:state . ,(agent-shell--state)) (:prompt . ,prompt) (:source . a2a)
+          (unless (funcall handler `((:state . ,(agent-shell--state)) (:prompt . ,prompt)
+                                     (:source . a2a)
                                      (:fallback . ,reject) (:on-success . ,accept)))
             (funcall reject))
         (error (funcall reject))))))
@@ -809,30 +877,26 @@ timestamp and ID, so it stays valid after older tasks are evicted."
 
 (defun agent-shell-a2a--cancel (agent task process id)
   "Request cancellation of AGENT's owned TASK, answering PROCESS with ID.
-The reply waits until the turn actually ends; queued tasks need no interrupt."
-  (if (memq task (map-elt agent :pending-tasks))
-      (progn
-        (agent-shell-a2a--end-task agent task 'canceled "Canceled before queued delivery")
-        (agent-shell-a2a--rpc-result process id (agent-shell-a2a--task-json task)))
-    (unless (and (eq task (map-elt agent :active-task))
-                 (not (agent-shell-a2a--terminal-p task)))
-      (agent-shell-a2a--reject -32002 "Task cannot be canceled"))
-    (with-current-buffer (map-elt agent :buffer)
-      (unless (equal (map-nested-elt (agent-shell--state) '(:session :id))
-                     (map-elt agent :session-id))
-        (agent-shell-a2a--reject -32002 "Shell session changed"))
-      (unless (map-elt task :canceling)
-        (condition-case nil
-            (agent-shell-interrupt t)
-          (error (agent-shell-a2a--reject -32002 "The agent could not be asked to cancel")))
-        (map-put! task :canceling t))
-      (cond
-       ((not (agent-shell-a2a--terminal-p task))
-        (map-put! task :cancel-waiters
-                  (cons (cons process id) (map-elt task :cancel-waiters))))
-       ((eq (map-elt task :state) 'canceled)
-        (agent-shell-a2a--rpc-result process id (agent-shell-a2a--task-json task)))
-       (t (agent-shell-a2a--reject -32002 "Turn did not end with cancellation"))))))
+The reply waits until the turn actually ends."
+  (unless (and (eq task (map-elt agent :active-task))
+               (not (agent-shell-a2a--terminal-p task)))
+    (agent-shell-a2a--reject -32002 "Task cannot be canceled"))
+  (with-current-buffer (map-elt agent :buffer)
+    (unless (equal (map-nested-elt (agent-shell--state) '(:session :id))
+                   (map-elt agent :session-id))
+      (agent-shell-a2a--reject -32002 "Shell session changed"))
+    (unless (map-elt task :canceling)
+      (condition-case nil
+          (agent-shell-interrupt t)
+        (error (agent-shell-a2a--reject -32002 "The agent could not be asked to cancel")))
+      (map-put! task :canceling t))
+    (cond
+     ((not (agent-shell-a2a--terminal-p task))
+      (map-put! task :cancel-waiters
+                (cons (cons process id) (map-elt task :cancel-waiters))))
+     ((eq (map-elt task :state) 'canceled)
+      (agent-shell-a2a--rpc-result process id (agent-shell-a2a--task-json task)))
+     (t (agent-shell-a2a--reject -32002 "Turn did not end with cancellation")))))
 
 (defun agent-shell-a2a--dispatch (agent request process headers)
   "Dispatch JSON-RPC REQUEST to AGENT on PROCESS using HTTP HEADERS."

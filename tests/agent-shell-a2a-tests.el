@@ -182,254 +182,260 @@
       (should (equal (map-nested-elt (agent-shell-a2a-tests--json connection) '(result task status state))
                      "TASK_STATE_COMPLETED")))))
 
-(ert-deftest agent-shell-a2a-refuses-unrelated-work-and-drafts-test ()
+(ert-deftest agent-shell-a2a-refuses-unsupported-active-input-and-idle-drafts-test ()
   (agent-shell-a2a-tests--with-gateway
     (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
     (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json
-                                     (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
-                                    '(error code))))
+                                       (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
+                                      '(error code))))
     (with-current-buffer shell
       (setq agent-shell-a2a-tests--busy nil)
       (insert "Unsubmitted draft"))
     (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json
-                                     (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
-                                    '(error code))))
+                                       (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
+                                      '(error code))))
     (should-not agent-shell-a2a-tests--sent)
     (should (equal (with-current-buffer shell (buffer-string)) "Unsubmitted draft"))))
 
-(defun agent-shell-a2a-tests--queue-params (id text)
-  "Make a queued task request with message ID and TEXT."
-  (let ((params (agent-shell-a2a-tests--send-params id nil nil text)))
-    (map-put! params 'message (map-insert (map-elt params 'message) 'metadata
-                                        '((agentShellDelivery . "queue"))))
-    params))
+(defun agent-shell-a2a-tests--active-handler (shell handler)
+  "Make fixture SHELL busy with active input HANDLER."
+  (with-current-buffer shell
+    (setq agent-shell-a2a-tests--busy t)
+    (map-put! agent-shell--state :agent-config `((:busy-prompt-handler . ,handler)))))
 
-(ert-deftest agent-shell-a2a-queued-task-waits-for-idle-test ()
+(defun agent-shell-a2a-tests--accept (event)
+  "Acknowledge EVENT through the same event seam as the adapters."
+  (agent-shell--active-input-accepted event)
+  (funcall (map-elt event :on-success)))
+
+(ert-deftest agent-shell-a2a-new-message-delivers-to-unowned-active-turn-test ()
   (agent-shell-a2a-tests--with-gateway
-    (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
-    (let ((task (agent-shell-a2a-tests--task (agent-shell-a2a-tests--queue-params "queued-1" "Ping"))))
-      (should (equal (map-nested-elt task '(status state)) "TASK_STATE_SUBMITTED"))
-      (should-not agent-shell-a2a-tests--sent)
-      (agent-shell-a2a-tests--event shell 'agent-message-chunk '((:text-chunk . "Unrelated output")))
-      (agent-shell-a2a-tests--event shell 'turn-complete '((:stop-reason . "end_turn")))
-      (with-current-buffer shell (setq agent-shell-a2a-tests--busy nil))
-      (agent-shell-a2a--pump)
-      (should (equal agent-shell-a2a-tests--sent '("Ping")))
-      (should (equal (map-elt (agent-shell-a2a-tests--agent) :pending-tasks) nil))
-      (should (string-empty-p (map-elt (map-elt (agent-shell-a2a-tests--agent) :active-task) :output)))
-      (should (equal (map-nested-elt (agent-shell-a2a-tests--json
-                                     (agent-shell-a2a-tests--rpc "GetTask" `((id . ,(map-elt task 'id)))))
-                                    '(result status state)) "TASK_STATE_WORKING")))))
-
-(ert-deftest agent-shell-a2a-queued-task-preserves-draft-and-local-queue-test ()
-  (agent-shell-a2a-tests--with-gateway
-    (with-current-buffer shell (insert "Human draft"))
-    (agent-shell-a2a-tests--task (agent-shell-a2a-tests--queue-params "queued-1" "Ping"))
-    (agent-shell-a2a--pump)
-    (should-not agent-shell-a2a-tests--sent)
-    (should (equal (with-current-buffer shell (buffer-string)) "Human draft"))
-    (with-current-buffer shell
-      (erase-buffer)
-      (setq agent-shell--state (map-insert agent-shell--state :pending-prompts '("Human queued input"))))
-    (agent-shell-a2a--pump)
-    (should-not agent-shell-a2a-tests--sent)
-    (should (equal (with-current-buffer shell (map-elt agent-shell--state :pending-prompts))
-                   '("Human queued input")))
-    (with-current-buffer shell (map-put! agent-shell--state :pending-prompts nil))
-    (agent-shell-a2a--pump)
-    (should (equal agent-shell-a2a-tests--sent '("Ping")))))
-
-(ert-deftest agent-shell-a2a-queued-tasks-are-fifo-and-idempotent-test ()
-  (agent-shell-a2a-tests--with-gateway
-    (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
-    (let* ((params (agent-shell-a2a-tests--queue-params "queued-1" "First"))
-           (first (agent-shell-a2a-tests--task params)))
-      (should (equal (map-elt first 'id) (map-elt (agent-shell-a2a-tests--task params) 'id)))
-      (agent-shell-a2a-tests--task (agent-shell-a2a-tests--queue-params "queued-2" "Second"))
-      (should (= 2 (length (map-elt (agent-shell-a2a-tests--agent) :pending-tasks))))
-      (with-current-buffer shell (setq agent-shell-a2a-tests--busy nil))
-      (agent-shell-a2a--pump)
-      (agent-shell-a2a--pump)
-      (should (equal agent-shell-a2a-tests--sent '("First")))
-      (agent-shell-a2a-tests--event shell 'turn-complete '((:stop-reason . "end_turn")))
-      (with-current-buffer shell (setq agent-shell-a2a-tests--busy nil))
-      (agent-shell-a2a--pump)
-      (should (equal (reverse agent-shell-a2a-tests--sent) '("First" "Second"))))))
-
-(ert-deftest agent-shell-a2a-queued-task-can-be-canceled-without-interruption-test ()
-  (agent-shell-a2a-tests--with-gateway
-    (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
-    (let ((task (agent-shell-a2a-tests--task (agent-shell-a2a-tests--queue-params "queued-1" "Ping"))))
-      (should (equal (map-nested-elt (agent-shell-a2a-tests--json
-                                     (agent-shell-a2a-tests--rpc "CancelTask" `((id . ,(map-elt task 'id)))))
-                                    '(result status state)) "TASK_STATE_CANCELED"))
-      (with-current-buffer shell (setq agent-shell-a2a-tests--busy nil))
-      (agent-shell-a2a--pump)
-      (should-not agent-shell-a2a-tests--sent)
-      (should-not agent-shell-a2a-tests--interrupted))))
-
-(ert-deftest agent-shell-a2a-queued-task-fails-on-session-change-or-withdrawal-test ()
-  (dolist (reason '(session withdrawn closed))
-    (agent-shell-a2a-tests--with-gateway
-      (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
-      (agent-shell-a2a-tests--task (agent-shell-a2a-tests--queue-params "queued-1" "Ping"))
-      (let ((task (car (map-elt (agent-shell-a2a-tests--agent) :pending-tasks))))
-        (pcase reason
-          ('session
-           (with-current-buffer shell (map-put! (map-elt agent-shell--state :session) :id "changed"))
-           (agent-shell-a2a--pump))
-          ('withdrawn (agent-shell-a2a-unexpose shell))
-          ('closed (agent-shell-a2a-tests--event shell 'clean-up)))
-        (should (eq (map-elt task :state) 'failed))
+    (let (callback)
+      (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event) t))
+      (with-current-buffer shell
+        (insert "Human draft")
+        (setq agent-shell--state (map-insert agent-shell--state :pending-prompts '("Human queued prompt"))))
+      (let ((connection (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params))))
+        (should (equal (map-elt callback :prompt) "Please inspect the parser"))
+        (should (eq (map-elt callback :source) 'a2a))
+        (should (string-empty-p (map-elt connection :wire)))
+        (agent-shell-a2a-tests--accept callback)
+        (let ((result (map-elt (agent-shell-a2a-tests--json connection) 'result)))
+          (should (equal (map-nested-elt result '(message role)) "ROLE_AGENT"))
+          (should (map-nested-elt result '(message messageId)))
+          (should-not (map-contains-key result 'task)))
+        (agent-shell-a2a-tests--event shell 'agent-message-chunk '((:text-chunk . "Unrelated output")))
+        (should-not (map-elt (agent-shell-a2a-tests--agent) :tasks))
         (should-not agent-shell-a2a-tests--sent)
-        (should-not agent-shell-a2a-tests--interrupted)))))
+        (should-not agent-shell-a2a-tests--interrupted)
+        (should (equal (with-current-buffer shell (buffer-string)) "Human draft"))
+        (should (equal (with-current-buffer shell (map-elt agent-shell--state :pending-prompts))
+                       '("Human queued prompt")))))))
 
-(ert-deftest agent-shell-a2a-queue-capacity-and-policy-are-checked-test ()
+(ert-deftest agent-shell-a2a-active-retries-wait-for-one-delivery-test ()
   (agent-shell-a2a-tests--with-gateway
-    (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
-    (let ((agent-shell-a2a--max-pending-tasks 1))
-      (let ((task (agent-shell-a2a-tests--task (agent-shell-a2a-tests--queue-params "queued-1" "Ping"))))
+    (let (callback (calls 0))
+      (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event calls (1+ calls)) t))
+      (let ((first (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
+            (retry (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params))))
+        (should (= calls 1))
+        (should (string-empty-p (map-elt retry :wire)))
+        (agent-shell-a2a-tests--accept callback)
+        (let ((receipt (map-elt (agent-shell-a2a-tests--json first) 'result)))
+          (should (equal receipt (map-elt (agent-shell-a2a-tests--json retry) 'result)))
+          (agent-shell-a2a-tests--event shell 'turn-complete '((:stop-reason . "end_turn")))
+          (with-current-buffer shell (setq agent-shell-a2a-tests--busy nil))
+          (should (equal receipt (map-elt (agent-shell-a2a-tests--json
+                                           (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
+                                          'result))))
+        (should (= calls 1))))))
+
+(ert-deftest agent-shell-a2a-active-conflicting-or-concurrent-input-is-refused-test ()
+  (agent-shell-a2a-tests--with-gateway
+    (let (callback)
+      (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event) t))
+      (let ((connection (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params))))
+        (dolist (case '((nil "Changed" -32602) ("new-id" "Second" -32004)))
+          (should (= (nth 2 case)
+                     (map-nested-elt (agent-shell-a2a-tests--json
+                                      (agent-shell-a2a-tests--rpc "SendMessage"
+                                                                  (agent-shell-a2a-tests--send-params
+                                                                   (car case) nil nil (cadr case))))
+                                     '(error code)))))
+        (agent-shell-a2a-tests--accept callback)
+        (agent-shell-a2a-tests--json connection)))))
+
+(ert-deftest agent-shell-a2a-active-refusal-never-starts-or-queues-a-turn-test ()
+  (dolist (mode '(unsupported declined fallback error))
+    (agent-shell-a2a-tests--with-gateway
+      (let (callback)
+        (agent-shell-a2a-tests--active-handler
+         shell (pcase mode
+                 ('unsupported nil)
+                 ('declined (lambda (_event) nil))
+                 ('fallback (lambda (event) (setq callback event) (funcall (map-elt event :fallback)) t))
+                 ('error (lambda (_event) (error "Transport refused")))))
         (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json
-                                          (agent-shell-a2a-tests--rpc "SendMessage"
-                                                                    (agent-shell-a2a-tests--queue-params "queued-2" "Second")))
-                                         '(error code))))
-        (let ((params (agent-shell-a2a-tests--queue-params "queued-3" "Follow-up")))
-          (map-put! params 'message (map-insert (map-elt params 'message) 'taskId (map-elt task 'id)))
-          (should (= -32602 (map-nested-elt (agent-shell-a2a-tests--json
-                                            (agent-shell-a2a-tests--rpc "SendMessage" params)) '(error code)))))))
-    (should-not agent-shell-a2a-tests--sent)))
+                                           (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
+                                          '(error code))))
+        (when callback (funcall (map-elt callback :on-success)))
+        (should-not agent-shell-a2a-tests--sent)
+        (should-not (map-elt (agent-shell-a2a-tests--agent) :tasks))
+        (should-not (with-current-buffer shell (map-elt agent-shell--state :pending-prompts)))))))
 
-(defun agent-shell-a2a-tests--queued (shell id text)
-  "Queue a task with message ID and TEXT while fixture SHELL is busy."
-  (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
-  (agent-shell-a2a-tests--task (agent-shell-a2a-tests--queue-params id text)))
+(ert-deftest agent-shell-a2a-active-late-acknowledgement-is-refused-test ()
+  (dolist (event '(turn-complete clean-up error session-change))
+    (agent-shell-a2a-tests--with-gateway
+      (let (callback)
+        (agent-shell-a2a-tests--active-handler shell (lambda (input) (setq callback input) t))
+        (let ((connection (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params))))
+          (if (eq event 'session-change)
+              (with-current-buffer shell (map-put! agent-shell--state :session '((:id . "new-session"))))
+            (agent-shell-a2a-tests--event shell event '((:stop-reason . "end_turn"))))
+          (funcall (map-elt callback :on-success))
+          (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json connection) '(error code))))
+          (should-not (map-elt (agent-shell-a2a-tests--agent) :delivery)))))))
 
-(defun agent-shell-a2a-tests--idle (shell)
-  "Make fixture SHELL idle and run one readiness check."
-  (with-current-buffer shell (setq agent-shell-a2a-tests--busy nil))
-  (agent-shell-a2a--pump))
-
-(ert-deftest agent-shell-a2a-queue-is-not-overtaken-by-immediate-send-test ()
+(ert-deftest agent-shell-a2a-unowned-input-ends-only-owned-output-forwarding-test ()
   (agent-shell-a2a-tests--with-gateway
-    (agent-shell-a2a-tests--queued shell "queued-1" "First")
-    (with-current-buffer shell (setq agent-shell-a2a-tests--busy nil))
-    (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json
-                                     (agent-shell-a2a-tests--rpc
-                                      "SendMessage" (agent-shell-a2a-tests--send-params "immediate-1" nil nil "Second")))
-                                    '(error code))))
-    (agent-shell-a2a--pump)
-    (should (equal agent-shell-a2a-tests--sent '("First")))))
+    (let* ((task-json (agent-shell-a2a-tests--task))
+           (task (map-elt (agent-shell-a2a-tests--agent) :active-task)) callback)
+      (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event) t))
+      (let ((connection (agent-shell-a2a-tests--rpc "SendMessage"
+                                                    (agent-shell-a2a-tests--send-params "other-message"))))
+        (should (eq (map-elt task :state) 'working))
+        (agent-shell-a2a-tests--accept callback)
+        (should (map-nested-elt (agent-shell-a2a-tests--json connection) '(result message)))
+        (should (eq (map-elt task :state) 'failed))
+        (should (eq task (map-elt (agent-shell-a2a-tests--agent) :active-task)))
+        (agent-shell-a2a-tests--event shell 'agent-message-chunk '((:text-chunk . "Different request output")))
+        (should (string-empty-p (map-elt task :output)))
+        (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json
+                                           (agent-shell-a2a-tests--rpc "SendMessage"
+                                                                       (agent-shell-a2a-tests--send-params
+                                                                        "owned-followup" (map-elt task-json 'id))))
+                                          '(error code))))
+        (should-not agent-shell-a2a-tests--interrupted)
+        (agent-shell-a2a-tests--event shell 'turn-complete '((:stop-reason . "end_turn")))
+        (should-not (map-elt (agent-shell-a2a-tests--agent) :active-task))))))
 
-(ert-deftest agent-shell-a2a-queue-waits-for-compose-draft-and-live-prompt-test ()
+(ert-deftest agent-shell-a2a-active-receipt-stream-closes-without-turn-output-test ()
   (agent-shell-a2a-tests--with-gateway
-    (let ((viewport (get-buffer-create (concat (buffer-name shell) agent-shell-viewport--suffix))))
+    (agent-shell-a2a-tests--active-handler shell (lambda (event) (agent-shell-a2a-tests--accept event) t))
+    (let* ((connection (agent-shell-a2a-tests--rpc "SendStreamingMessage" (agent-shell-a2a-tests--send-params)))
+           (wire (agent-shell-a2a-tests--settle connection t)))
+      (should (string-match-p "Content-Type: text/event-stream" wire))
+      (should (string-match-p "\"message\":{\"messageId\":" wire))
+      (should-not (string-match-p "\"task\":" wire))
+      (should-not (process-live-p (map-elt connection :process))))))
+
+(ert-deftest agent-shell-a2a-unowned-late-ack-does-not-fail-a-later-task-test ()
+  (agent-shell-a2a-tests--with-gateway
+    (let (callback)
+      (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event) t))
+      (let ((connection (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params))))
+        (agent-shell-a2a-tests--event shell 'turn-complete '((:stop-reason . "end_turn")))
+        (with-current-buffer shell (setq agent-shell-a2a-tests--busy nil))
+        (let ((new-task (agent-shell-a2a-tests--task (agent-shell-a2a-tests--send-params "new-turn"))))
+          (agent-shell-a2a-tests--accept callback)
+          (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json connection) '(error code))))
+          (should (equal (map-nested-elt new-task '(status state)) "TASK_STATE_WORKING"))
+          (should (eq (map-elt (map-elt (agent-shell-a2a-tests--agent) :active-task) :state) 'working)))))))
+
+(ert-deftest agent-shell-a2a-withdraw-or-stop-rejects-pending-delivery-test ()
+  (dolist (action '(withdraw stop))
+    (agent-shell-a2a-tests--with-gateway
+      (let (callback)
+        (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event) t))
+        (let ((connection (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params))))
+          (pcase action
+            ('withdraw (agent-shell-a2a-unexpose shell))
+            ('stop (agent-shell-a2a-stop)))
+          (funcall (map-elt callback :on-success))
+          (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json connection) '(error code))))
+          (should-not agent-shell-a2a-tests--interrupted))))))
+
+(ert-deftest agent-shell-a2a-disconnected-active-sender-can-retrieve-receipt-test ()
+  (agent-shell-a2a-tests--with-gateway
+    (let (callback (calls 0))
+      (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event calls (1+ calls)) t))
+      (let ((connection (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params))))
+        (delete-process (map-elt connection :process))
+        (accept-process-output nil 0.02)
+        (agent-shell-a2a-tests--accept callback)
+        (should (map-nested-elt (agent-shell-a2a-tests--json
+                                 (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
+                                '(result message)))
+        (should (= calls 1))))))
+
+(ert-deftest agent-shell-a2a-owned-active-send-keeps-blocking-and-stream-semantics-test ()
+  (dolist (mode '(blocking streaming))
+    (agent-shell-a2a-tests--with-gateway
+      (let ((task (agent-shell-a2a-tests--task)) callback)
+        (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event) t))
+        (let ((connection (agent-shell-a2a-tests--rpc
+                           (if (eq mode 'streaming) "SendStreamingMessage" "SendMessage")
+                           (agent-shell-a2a-tests--send-params
+                            "followup" (map-elt task 'id) '((returnImmediately . :false))))))
+          (agent-shell-a2a-tests--accept callback)
+          (should-not (map-elt (agent-shell-a2a-tests--agent) :receipts))
+          (if (eq mode 'streaming)
+              (should (string-match-p "Content-Type: text/event-stream" (agent-shell-a2a-tests--settle connection)))
+            (should (string-empty-p (map-elt connection :wire))))
+          (agent-shell-a2a-tests--event shell 'agent-message-chunk '((:text-chunk . "Result")))
+          (agent-shell-a2a-tests--event shell 'turn-complete '((:stop-reason . "end_turn")))
+          (if (eq mode 'streaming)
+              (should (string-match-p "artifactUpdate" (agent-shell-a2a-tests--settle connection t)))
+            (should (equal (map-nested-elt (agent-shell-a2a-tests--json connection) '(result task status state))
+                           "TASK_STATE_COMPLETED"))))))))
+
+(ert-deftest agent-shell-a2a-active-receipts-are-bounded-test ()
+  (agent-shell-a2a-tests--with-gateway
+    (agent-shell-a2a-tests--active-handler shell (lambda (event) (agent-shell-a2a-tests--accept event) t))
+    (let ((agent-shell-a2a--max-retained-tasks 2))
+      (dotimes (index 4)
+        (agent-shell-a2a-tests--json (agent-shell-a2a-tests--rpc "SendMessage"
+                                                                 (agent-shell-a2a-tests--send-params (format "message-%s" index)))))
+      (should (= 2 (length (map-elt (agent-shell-a2a-tests--agent) :receipts)))))
+    (let ((agent-shell-a2a--max-retained-bytes 1))
+      (agent-shell-a2a-tests--json (agent-shell-a2a-tests--rpc "SendMessage"
+                                                               (agent-shell-a2a-tests--send-params "budget")))
+      (should-not (map-elt (agent-shell-a2a-tests--agent) :receipts)))))
+
+(ert-deftest agent-shell-a2a-pending-receipt-survives-retention-budget-test ()
+  (agent-shell-a2a-tests--with-gateway
+    (let ((agent-shell-a2a--max-retained-bytes 1) callback (calls 0))
+      (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event calls (1+ calls)) t))
+      (let ((first (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
+            (retry (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params))))
+        (agent-shell-a2a-tests--accept callback)
+        (should (map-nested-elt (agent-shell-a2a-tests--json first) '(result message)))
+        (should (map-nested-elt (agent-shell-a2a-tests--json retry) '(result message)))
+        (should (= calls 1))
+        (should-not (map-elt (agent-shell-a2a-tests--agent) :receipts))))))
+
+(ert-deftest agent-shell-a2a-removed-queue-policy-is-refused-test ()
+  (agent-shell-a2a-tests--with-gateway
+    (let ((params (agent-shell-a2a-tests--send-params)))
+      (map-put! params 'message (map-insert (map-elt params 'message) 'metadata '((agentShellDelivery . "queue"))))
+      (should (= -32602 (map-nested-elt (agent-shell-a2a-tests--json
+                                         (agent-shell-a2a-tests--rpc "SendMessage" params)) '(error code))))
+      (should-not agent-shell-a2a-tests--sent))))
+
+(ert-deftest agent-shell-a2a-idle-compose-draft-is-preserved-test ()
+  (agent-shell-a2a-tests--with-gateway
+    (let ((compose (generate-new-buffer " *a2a-compose*")))
       (unwind-protect
-          (progn
-            (with-current-buffer viewport
+          (cl-letf (((symbol-function 'agent-shell-viewport--buffer) (lambda (&rest _args) compose)))
+            (with-current-buffer compose
               (setq-local major-mode 'agent-shell-viewport-edit-mode)
-              (insert "Human compose draft"))
-            (agent-shell-a2a-tests--queued shell "queued-1" "Ping")
-            (agent-shell-a2a-tests--idle shell)
-            (should-not agent-shell-a2a-tests--sent)
-            (should (equal (with-current-buffer viewport (buffer-string)) "Human compose draft"))
-            (with-current-buffer viewport (erase-buffer))
-            (cl-letf (((symbol-function 'agent-shell--prompt-input-start) #'ignore))
-              (agent-shell-a2a--pump))
-            (should-not agent-shell-a2a-tests--sent)
-            (agent-shell-a2a--pump)
-            (should (equal agent-shell-a2a-tests--sent '("Ping"))))
-        (kill-buffer viewport)))))
-
-(ert-deftest agent-shell-a2a-queued-blocking-send-collects-only-its-turn-test ()
-  (agent-shell-a2a-tests--with-gateway
-    (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
-    (let ((connection (agent-shell-a2a-tests--rpc
-                       "SendMessage"
-                       (let ((params (agent-shell-a2a-tests--queue-params "queued-1" "Ping")))
-                         (map-put! params 'configuration '((returnImmediately . :false)))
-                         params))))
-      (accept-process-output nil 0.05)
-      (should (string-empty-p (map-elt connection :wire)))
-      (agent-shell-a2a-tests--event shell 'agent-message-chunk '((:text-chunk . "Unrelated output")))
-      (agent-shell-a2a-tests--event shell 'turn-complete '((:stop-reason . "end_turn")))
-      (should (string-empty-p (map-elt connection :wire)))
-      (agent-shell-a2a-tests--idle shell)
-      (agent-shell-a2a-tests--event shell 'agent-message-chunk '((:text-chunk . "Pong")))
-      (agent-shell-a2a-tests--event shell 'turn-complete '((:stop-reason . "end_turn")))
-      (let ((task (map-nested-elt (agent-shell-a2a-tests--json connection) '(result task))))
-        (should (equal (map-nested-elt task '(status state)) "TASK_STATE_COMPLETED"))
-        (should (equal (map-nested-elt (aref (map-elt task 'artifacts) 0) '(parts))
-                       [((text . "Pong"))]))))))
-
-(ert-deftest agent-shell-a2a-queued-stream-reports-submission-then-delivery-test ()
-  (agent-shell-a2a-tests--with-gateway
-    (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
-    (let ((connection (agent-shell-a2a-tests--rpc "SendStreamingMessage"
-                                                (agent-shell-a2a-tests--queue-params "queued-1" "Ping"))))
-      (agent-shell-a2a-tests--settle connection)
-      (agent-shell-a2a-tests--idle shell)
-      (agent-shell-a2a-tests--event shell 'turn-complete '((:stop-reason . "end_turn")))
-      (let ((events (seq-keep (lambda (line)
-                                (when (string-prefix-p "data: " line)
-                                  (json-parse-string (substring line 6) :object-type 'alist)))
-                              (split-string (agent-shell-a2a-tests--settle connection t) "\n"))))
-        (should (equal (map-nested-elt (car events) '(result task status state)) "TASK_STATE_SUBMITTED"))
-        (should (equal (seq-keep (lambda (event) (map-nested-elt event '(result statusUpdate status state)))
-                                 (cdr events))
-                       '("TASK_STATE_WORKING" "TASK_STATE_COMPLETED")))))))
-
-(ert-deftest agent-shell-a2a-canceled-queued-task-answers-blocked-sender-test ()
-  (agent-shell-a2a-tests--with-gateway
-    (with-current-buffer shell (setq agent-shell-a2a-tests--busy t))
-    (let* ((connection (agent-shell-a2a-tests--rpc
-                        "SendMessage"
-                        (let ((params (agent-shell-a2a-tests--queue-params "queued-1" "Ping")))
-                          (map-put! params 'configuration '((returnImmediately . :false)))
-                          params)))
-           (task (progn (accept-process-output nil 0.05)
-                        (car (map-elt (agent-shell-a2a-tests--agent) :pending-tasks)))))
-      (agent-shell-a2a-tests--json (agent-shell-a2a-tests--rpc "CancelTask" `((id . ,(map-elt task :id)))))
-      (should (equal (map-nested-elt (agent-shell-a2a-tests--json connection) '(result task status state))
-                     "TASK_STATE_CANCELED"))
-      (should-not agent-shell-a2a-tests--interrupted))))
-
-(ert-deftest agent-shell-a2a-failed-queued-submission-advances-queue-test ()
-  (agent-shell-a2a-tests--with-gateway
-    (agent-shell-a2a-tests--queued shell "queued-1" "First")
-    (agent-shell-a2a-tests--queued shell "queued-2" "Second")
-    (let ((first (car (map-elt (agent-shell-a2a-tests--agent) :pending-tasks))))
-      (cl-letf (((symbol-function 'agent-shell--insert-to-shell-buffer) #'ignore))
-        (agent-shell-a2a-tests--idle shell))
-      (should (eq (map-elt first :state) 'failed))
-      (should-not (map-elt (agent-shell-a2a-tests--agent) :active-task))
-      (agent-shell-a2a--pump)
-      (should (equal agent-shell-a2a-tests--sent '("Second"))))))
-
-(ert-deftest agent-shell-a2a-queue-failures-are-contained-test ()
-  (agent-shell-a2a-tests--with-gateway
-    (agent-shell-a2a-tests--queued shell "queued-1" "Ping")
-    (let ((task (car (map-elt (agent-shell-a2a-tests--agent) :pending-tasks))))
-      (cl-letf (((symbol-function 'agent-shell-a2a--ready-p) (lambda (_agent) (error "Readiness broke"))))
-        (agent-shell-a2a--pump))
-      (should (eq (map-elt task :state) 'failed))
-      (should-not (map-elt (agent-shell-a2a-tests--agent) :pending-tasks)))
-    (agent-shell-a2a-tests--queued shell "queued-2" "Ping")
-    (let ((task (car (map-elt (agent-shell-a2a-tests--agent) :pending-tasks))))
-      (kill-buffer shell)
-      (agent-shell-a2a--pump)
-      (should (eq (map-elt task :state) 'failed))
-      (should-not (map-elt agent-shell-a2a--server :agents)))))
-
-(ert-deftest agent-shell-a2a-stop-cancels-readiness-timer-and-fails-queue-test ()
-  (agent-shell-a2a-tests--with-gateway
-    (agent-shell-a2a-tests--queued shell "queued-1" "Ping")
-    (let ((task (car (map-elt (agent-shell-a2a-tests--agent) :pending-tasks)))
-          (timer (map-elt agent-shell-a2a--server :pump-timer)))
-      (should (memq timer timer-list))
-      (agent-shell-a2a-stop)
-      (should-not (memq timer timer-list))
-      (should (eq (map-elt task :state) 'failed))
-      (should-not agent-shell-a2a-tests--interrupted))))
+              (insert "Compose draft"))
+            (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json
+                                               (agent-shell-a2a-tests--rpc "SendMessage" (agent-shell-a2a-tests--send-params)))
+                                              '(error code))))
+            (should (equal (with-current-buffer compose (buffer-string)) "Compose draft"))
+            (should-not agent-shell-a2a-tests--sent))
+        (kill-buffer compose)))))
 
 (ert-deftest agent-shell-a2a-task-and-context-isolation-test ()
   (agent-shell-a2a-tests--with-gateway
@@ -479,20 +485,43 @@
         (should (equal (map-nested-elt (agent-shell-a2a-tests--json connection) '(result task id)) (map-elt task 'id)))
         (should (= 2 (length (map-elt (map-elt (agent-shell-a2a-tests--agent) :active-task) :history))))))))
 
-(ert-deftest agent-shell-a2a-steer-keeps-pending-permission-visible-test ()
+(ert-deftest agent-shell-a2a-active-input-waits-for-human-permission-or-form-test ()
+  (dolist (pending '(permission form))
+    (agent-shell-a2a-tests--with-gateway
+      (let ((task (agent-shell-a2a-tests--task)) called)
+        (agent-shell-a2a-tests--active-handler shell (lambda (_event) (setq called t) t))
+        (cl-letf (((symbol-function (if (eq pending 'permission)
+                                        'agent-shell--permission-pending-p
+                                      'agent-shell-elicitation--pending-p))
+                   (lambda (&rest _args) t)))
+          (agent-shell-a2a-tests--event shell (if (eq pending 'permission) 'permission-request 'elicitation-request))
+          (dolist (params (list (agent-shell-a2a-tests--send-params "unowned")
+                                (agent-shell-a2a-tests--send-params "owned" (map-elt task 'id))))
+            (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json
+                                               (agent-shell-a2a-tests--rpc "SendMessage" params))
+                                              '(error code))))))
+        (should-not called)
+        (should (eq (map-elt (map-elt (agent-shell-a2a-tests--agent) :active-task) :state) 'input-required))
+        (should-not (map-elt (agent-shell-a2a-tests--agent) :delivery))))))
+
+(ert-deftest agent-shell-a2a-owned-input-accepted-after-forwarding-ended-is-a-receipt-test ()
   (agent-shell-a2a-tests--with-gateway
-    (let ((task (agent-shell-a2a-tests--task)) callback)
-      (with-current-buffer shell
-        (map-put! agent-shell--state :agent-config `((:busy-prompt-handler . ,(lambda (event) (setq callback event) t))))
-        (setq agent-shell--state
-              (map-insert agent-shell--state :tool-calls '(("tool" . ((:permission-request-id . 7)))))))
-      (agent-shell-a2a-tests--event shell 'permission-request)
+    (let* ((task-json (agent-shell-a2a-tests--task))
+           (task (map-elt (agent-shell-a2a-tests--agent) :active-task)) callback)
+      (agent-shell-a2a-tests--active-handler shell (lambda (event) (setq callback event) t))
       (let ((connection (agent-shell-a2a-tests--rpc "SendMessage"
-                                                  (agent-shell-a2a-tests--send-params "message-2" (map-elt task 'id)))))
-        (agent-shell--active-input-accepted callback)
-        (funcall (map-elt callback :on-success))
-        (should (equal (map-nested-elt (agent-shell-a2a-tests--json connection) '(result task status state))
-                       "TASK_STATE_INPUT_REQUIRED"))))))
+                                                  (agent-shell-a2a-tests--send-params "followup" (map-elt task-json 'id)))))
+        ;; Human input ends forwarding while the native turn keeps running.
+        (agent-shell-a2a-tests--event shell 'input-submitted '((:prompt . "Human steer")))
+        (agent-shell-a2a-tests--accept callback)
+        (let ((result (map-elt (agent-shell-a2a-tests--json connection) 'result)))
+          (should (equal (map-nested-elt result '(message role)) "ROLE_AGENT"))
+          (should-not (map-contains-key result 'task)))
+        (should (= 1 (length (map-elt task :requests))))
+        (should (map-nested-elt (agent-shell-a2a-tests--json
+                                 (agent-shell-a2a-tests--rpc "SendMessage"
+                                                             (agent-shell-a2a-tests--send-params "followup" (map-elt task-json 'id))))
+                                '(result message)))))))
 
 (ert-deftest agent-shell-a2a-refused-steer-never-queues-test ()
   (agent-shell-a2a-tests--with-gateway
@@ -503,7 +532,9 @@
                                                   (agent-shell-a2a-tests--send-params "message-2" (map-elt task 'id)))))
         (funcall (map-elt callback :fallback))
         (funcall (map-elt callback :on-success))
-        (should (= -32004 (map-nested-elt (agent-shell-a2a-tests--json connection) '(error code))))
+        (let ((error (map-elt (agent-shell-a2a-tests--json connection) 'error)))
+          (should (= -32004 (map-elt error 'code)))
+          (should (string-match-p "do not resend with a new messageId" (map-elt error 'message))))
         (should-not (with-current-buffer shell (map-elt agent-shell--state :pending-prompts)))
         (should (= 1 (length (map-elt (map-elt (agent-shell-a2a-tests--agent) :active-task) :history))))))))
 
