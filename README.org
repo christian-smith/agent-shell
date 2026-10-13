@@ -156,6 +156,8 @@ Run =M-x agent-shell-codex-app-server-refresh-models= to update model choices wi
 
 The app-server adapter supports text, local and inline image/audio inputs, streamed command/file/MCP output, approvals, standard MCP forms, asynchronous questions, model and reasoning selection, session listing/resume/fork, hook activity, and authentication-recovery notices. Sub-agent activity preserves the resolved model and reasoning effort when supplied. File mentions of WAV, MP3, M4A, WebM, or Ogg audio are sent as audio input, other files remain path mentions, and audio inputs require a model that accepts audio. Experimental desktop/realtime, native verification, custom dynamic-tool execution, project management, durable read receipts, and server-owned queue APIs are not exposed by this shell adapter; unsupported server requests are declined or rejected, never approved automatically.
 
+Routine successful Codex hooks are hidden by default. Failed, blocked, or stopped hooks, and hooks reporting warnings, errors, stops, or feedback, remain visible; context-only output stays hidden. Set =(setq agent-shell-codex-app-server-show-hook-activity t)= to show all hook runs and their progress. This setting changes display only; hooks still run normally.
+
 *** Gemini CLI
 
 For Google's [[https://github.com/google-gemini/gemini-cli][Gemini CLI]], be sure to get a recent release supporting the =--experimental-acp= flag.

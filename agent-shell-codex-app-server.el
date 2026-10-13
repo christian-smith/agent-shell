@@ -46,6 +46,15 @@ and compliance logs identify Agent Shell separately.")
 (defvar agent-shell--version)
 (defvar agent-shell-codex-app-server--instance-count 0)
 
+(defcustom agent-shell-codex-app-server-show-hook-activity nil
+  "Whether to show routine Codex hook activity in the shell.
+When nil, successful hooks and context-only output stay hidden.  Failed,
+blocked, or stopped hooks, and hooks reporting warnings, errors, stops, or
+feedback, remain visible.  When non-nil, show all hook runs, including
+progress.  This affects display only, not hook execution."
+  :type 'boolean
+  :group 'agent-shell)
+
 (defvar agent-shell-codex-app-server-question-hook nil
   "Hook run once when asynchronous Codex questions are displayed.
 Each function receives a context alist with :client, :buffer,
@@ -1688,20 +1697,27 @@ newest-first chunks to fill the display limit."
 
 (defun agent-shell-codex-app-server--clear-tool-state (client &optional preserve-hooks)
   "Discard provider-side tool translation state for CLIENT.
-When PRESERVE-HOOKS is non-nil, retain the newest open asynchronous hook
-runs, up to `agent-shell-codex-app-server--max-open-hook-runs'."
+When PRESERVE-HOOKS is non-nil, retain open asynchronous hook runs, up to
+`agent-shell-codex-app-server--max-open-hook-runs', preferring displayed
+runs and then the newest."
   (agent-shell-codex-app-server--clear-pending-tool-output client)
   (if preserve-hooks
       (let (hooks)
         (maphash (lambda (item-id entry)
                    (if (map-elt entry :hook-run)
-                       (push (cons (map-elt entry :hook-order) item-id) hooks)
+                       (push (list (map-elt entry :hook-visible) (map-elt entry :hook-order) item-id)
+                             hooks)
                      (remhash item-id (map-elt client :tool-items))))
                  (map-elt client :tool-items))
-        ;; A run whose completion never arrives must not be kept forever.
+        ;; A run whose completion never arrives must not be kept forever, but
+        ;; quiet runs must not displace a displayed card that still needs closing.
         (dolist (stale (nthcdr agent-shell-codex-app-server--max-open-hook-runs
-                               (seq-sort (lambda (a b) (> (car a) (car b))) hooks)))
-          (remhash (cdr stale) (map-elt client :tool-items))))
+                               (seq-sort (lambda (a b)
+                                           (if (eq (not (car a)) (not (car b)))
+                                               (> (nth 1 a) (nth 1 b))
+                                             (car a)))
+                                         hooks)))
+          (remhash (nth 2 stale) (map-elt client :tool-items))))
     (clrhash (map-elt client :tool-items)))
   (clrhash (map-elt client :tool-outputs))
   (clrhash (agent-shell-codex-app-server--state-table
@@ -2597,7 +2613,13 @@ return any incomplete trailing text unchanged and discard the buffer."
           (map-nested-elt notification '(params turnId))))))
 
 (defvar agent-shell-codex-app-server--hook-run-count 0
-  "Count of displayed hook runs, used to give each run its own tool call.")
+  "Count of received hook runs, used to give each run its own tool call.")
+
+(defun agent-shell-codex-app-server--hook-attention-p (run)
+  "Return non-nil when hook RUN needs attention rather than routine display."
+  (or (not (member (map-elt run 'status) '("running" "completed")))
+      (seq-some (lambda (entry) (not (equal (map-elt entry 'kind) "context")))
+                (map-elt run 'entries))))
 
 (defun agent-shell-codex-app-server--oldest-hook-run (client key)
   "Return the ID of CLIENT's oldest open hook run whose identity begins with KEY.
@@ -2627,13 +2649,17 @@ two runs of hook \"preToolUse:0:/x\" become distinct tool calls."
                     (1+ agent-shell-codex-app-server--hook-run-count)))))
 
 (defun agent-shell-codex-app-server--handle-hook-notification (client notification)
-  "Translate a hook run in NOTIFICATION into a tool update for CLIENT."
+  "Track a hook run in NOTIFICATION and display relevant updates for CLIENT."
   (let* ((params (map-elt notification 'params))
          (run (map-elt params 'run))
          (hook (list (map-elt run 'id) (map-elt params 'turnId) (map-elt run 'startedAt)))
          (complete (equal (map-elt notification 'method) "hook/completed"))
          (item-id (agent-shell-codex-app-server--hook-item-id client hook complete))
-         (order (or (map-elt (gethash item-id (map-elt client :tool-items)) :hook-order)
+         (previous (gethash item-id (map-elt client :tool-items)))
+         (was-visible (map-elt previous :hook-visible))
+         (visible (or was-visible agent-shell-codex-app-server-show-hook-activity
+                      (agent-shell-codex-app-server--hook-attention-p run)))
+         (order (or (map-elt previous :hook-order)
                     agent-shell-codex-app-server--hook-run-count))
          (status (map-elt run 'status))
          (title (format "Hook: %s" (map-elt run 'eventName)))
@@ -2648,17 +2674,25 @@ two runs of hook \"preToolUse:0:/x\" become distinct tool calls."
                  (result . ((content . (((type . "text") (text . ,text)))))))))
     (puthash item-id
              `((:title . ,title) (:kind . "other") (:status . ,status)
-               (:hook-run . ,hook) (:hook-order . ,order)
+               (:hook-run . ,hook) (:hook-order . ,order) (:hook-visible . ,visible)
                (:raw-input . ((eventName . ,(map-elt run 'eventName))
                               (handlerType . ,(map-elt run 'handlerType))
                               (executionMode . ,(map-elt run 'executionMode))
                               (sourcePath . ,(map-elt run 'sourcePath)))))
              (map-elt client :tool-items))
     (unwind-protect
-        (agent-shell-codex-app-server--dispatch-notification
-         client
-         (agent-shell-codex-app-server--translate-tool-notification
-          (if complete "tool_call_update" "tool_call") client item status complete))
+        (when visible
+          ;; A quiet start (or missing start) needs a card before its update.
+          (unless was-visible
+            (agent-shell-codex-app-server--dispatch-notification
+             client
+             (agent-shell-codex-app-server--translate-tool-notification
+              "tool_call" client item status complete)))
+          (when complete
+            (agent-shell-codex-app-server--dispatch-notification
+             client
+             (agent-shell-codex-app-server--translate-tool-notification
+              "tool_call_update" client item status t))))
       (when complete (agent-shell-codex-app-server--clear-tool-item client item-id)))))
 
 (defun agent-shell-codex-app-server--handle-notification (client notification)

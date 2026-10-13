@@ -154,7 +154,8 @@
 (ert-deftest agent-shell-codex-app-server-hook-lifecycle-is-visible ()
   "Hooks render progress and terminal output without leaking state or threads."
   (dolist (status '("completed" "failed" "blocked" "stopped"))
-    (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+    (let ((agent-shell-codex-app-server-show-hook-activity t)
+          (client (agent-shell-codex-app-server-make-client :command "sh"))
           notifications)
       (map-put! client :thread-id "root")
       (acp-subscribe-to-notifications :client client
@@ -183,7 +184,8 @@
 
 (ert-deftest agent-shell-codex-app-server-repeated-hook-runs-stay-distinct ()
   "Runs of one hook definition get separate tool calls, completed in order."
-  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+  (let ((agent-shell-codex-app-server-show-hook-activity t)
+        (client (agent-shell-codex-app-server-make-client :command "sh"))
         notifications)
     (acp-subscribe-to-notifications :client client
                                     :on-notification (lambda (event) (push event notifications)))
@@ -202,7 +204,8 @@
 
 (ert-deftest agent-shell-codex-app-server-hook-order-is-independent-of-hash-order ()
   "Completion chooses the oldest matching run even with reverse table iteration."
-  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+  (let ((agent-shell-codex-app-server-show-hook-activity t)
+        (client (agent-shell-codex-app-server-make-client :command "sh"))
         (maphash-original (symbol-function 'maphash))
         notifications)
     (acp-subscribe-to-notifications :client client
@@ -233,7 +236,8 @@
 
 (ert-deftest agent-shell-codex-app-server-async-hooks-survive-turn-completion ()
   "A late hook completion retains its card and cannot finish a newer turn's hook."
-  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+  (let ((agent-shell-codex-app-server-show-hook-activity t)
+        (client (agent-shell-codex-app-server-make-client :command "sh"))
         notifications)
     (map-put! client :thread-id "root")
     (acp-subscribe-to-notifications :client client
@@ -262,17 +266,117 @@
       (should (equal (nth 1 ids) (nth 2 ids))))
     (should (= (hash-table-count (map-elt client :tool-items)) 0))))
 
-(defun agent-shell-codex-app-server-tests--hook (client method id turn started-at)
-  "Send hook METHOD for CLIENT's run ID in TURN starting at STARTED-AT."
+(defun agent-shell-codex-app-server-tests--hook (client method id turn started-at &optional status entries)
+  "Send hook METHOD for CLIENT's run ID in TURN starting at STARTED-AT.
+Use STATUS and ENTRIES when supplied, otherwise send routine activity."
   (agent-shell-codex-app-server--handle-notification
    client `((method . ,method)
             (params . ((threadId . "root") (turnId . ,turn)
                        (run . ((id . ,id) (eventName . "stop") (startedAt . ,started-at)
-                               (status . ,(if (equal method "hook/started") "running" "completed")))))))))
+                               (status . ,(or status (if (equal method "hook/started") "running" "completed")))
+                               (entries . ,entries))))))))
+
+(ert-deftest agent-shell-codex-app-server-routine-hooks-are-hidden ()
+  "Routine progress, completion, and context output create no shell cards."
+  (let ((agent-shell-codex-app-server-show-hook-activity nil)
+        (client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications)
+    (map-put! client :thread-id "root")
+    (acp-subscribe-to-notifications :client client
+                                    :on-notification (lambda (event) (push event notifications)))
+    (dolist (entries '(nil (((kind . "context") (text . "Model instructions")))))
+      (agent-shell-codex-app-server-tests--hook client "hook/started" "stop:0:/h" "turn" 123)
+      (should (= (hash-table-count (map-elt client :tool-items)) 1))
+      (agent-shell-codex-app-server-tests--hook client "hook/completed" "stop:0:/h" "turn" 124
+                                               "completed" entries)
+      (should-not notifications)
+      (should (= (hash-table-count (map-elt client :tool-items)) 0)))
+    ;; A routine completion with no start is quiet too.
+    (agent-shell-codex-app-server-tests--hook client "hook/completed" "postToolUse:0:/h" "turn" 125)
+    (should-not notifications)
+    (should (= (hash-table-count (map-elt client :tool-items)) 0))))
+
+(ert-deftest agent-shell-codex-app-server-hook-problems-remain-visible ()
+  "A hidden start still produces a complete card for problems and feedback."
+  (dolist (example '(("failed") ("blocked") ("stopped") ("futureStatus")
+                     ("completed" "warning") ("completed" "error")
+                     ("completed" "stop") ("completed" "feedback")
+                     ("completed" "futureEntry")))
+    (let ((agent-shell-codex-app-server-show-hook-activity nil)
+          (client (agent-shell-codex-app-server-make-client :command "sh"))
+          notifications)
+      (map-put! client :thread-id "root")
+      (acp-subscribe-to-notifications :client client
+                                      :on-notification (lambda (event) (push event notifications)))
+      (agent-shell-codex-app-server-tests--hook client "hook/started" "stop:0:/h" "old" 123)
+      (agent-shell-codex-app-server--handle-notification
+       client '((method . "turn/completed")
+                (params . ((threadId . "root") (turn . ((id . "old") (status . "completed")))))))
+      (should-not notifications)
+      (agent-shell-codex-app-server-tests--hook
+       client "hook/completed" "stop:0:/h" "old" 124 (car example)
+       (when (cadr example) `(((kind . ,(cadr example)) (text . "Important detail")))))
+      (should (= (length notifications) 2))
+      (should (equal (map-nested-elt (cadr notifications) '(params update sessionUpdate)) "tool_call"))
+      (should (equal (map-nested-elt (car notifications) '(params update sessionUpdate)) "tool_call_update"))
+      (should (equal (map-nested-elt (cadr notifications) '(params update toolCallId))
+                     (map-nested-elt (car notifications) '(params update toolCallId))))
+      (when (cadr example)
+        (should (equal (map-nested-elt (aref (map-nested-elt (car notifications) '(params update content)) 0)
+                                       '(content text))
+                       (format "%s: Important detail" (cadr example)))))
+      (should (= (hash-table-count (map-elt client :tool-items)) 0)))))
+
+(ert-deftest agent-shell-codex-app-server-hook-display-changes-mid-run ()
+  "Displayed cards still close after hiding activity; newly enabled cards render."
+  (let ((agent-shell-codex-app-server-show-hook-activity t)
+        (client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications)
+    (map-put! client :thread-id "root")
+    (acp-subscribe-to-notifications :client client
+                                    :on-notification (lambda (event) (push event notifications)))
+    (agent-shell-codex-app-server-tests--hook client "hook/started" "stop:0:/h" "turn" 123)
+    (setq agent-shell-codex-app-server-show-hook-activity nil)
+    (agent-shell-codex-app-server-tests--hook client "hook/completed" "stop:0:/h" "turn" 123)
+    (should (= (length notifications) 2))
+    (should (equal (map-nested-elt (car notifications) '(params update status)) "completed"))
+    (setq notifications nil)
+    (agent-shell-codex-app-server-tests--hook client "hook/started" "stop:0:/h" "turn" 124)
+    (should-not notifications)
+    (setq agent-shell-codex-app-server-show-hook-activity t)
+    (agent-shell-codex-app-server-tests--hook client "hook/completed" "stop:0:/h" "turn" 124)
+    (should (= (length notifications) 2))
+    (should (equal (map-nested-elt (cadr notifications) '(params update sessionUpdate)) "tool_call"))
+    (should (= (hash-table-count (map-elt client :tool-items)) 0))))
+
+(ert-deftest agent-shell-codex-app-server-quiet-hooks-cannot-evict-visible-cards ()
+  "Retention keeps a displayed run so its late completion still closes the card."
+  (let ((agent-shell-codex-app-server-show-hook-activity t)
+        (agent-shell-codex-app-server--max-open-hook-runs 1)
+        (client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications)
+    (map-put! client :thread-id "root")
+    (acp-subscribe-to-notifications :client client
+                                    :on-notification (lambda (event) (push event notifications)))
+    (agent-shell-codex-app-server-tests--hook client "hook/started" "visible:0:/h" "turn" 123)
+    (setq agent-shell-codex-app-server-show-hook-activity nil)
+    (dotimes (index 3)
+      (agent-shell-codex-app-server-tests--hook client "hook/started" (format "quiet:%d:/h" index) "turn" 124))
+    (agent-shell-codex-app-server--handle-notification
+     client '((method . "turn/completed")
+              (params . ((threadId . "root") (turn . ((id . "turn") (status . "completed")))))))
+    (should (= (hash-table-count (map-elt client :tool-items)) 1))
+    (agent-shell-codex-app-server-tests--hook client "hook/completed" "visible:0:/h" "turn" 123)
+    (should (= (length notifications) 2))
+    (should (equal (map-nested-elt (car notifications) '(params update sessionUpdate)) "tool_call_update"))
+    (should (equal (map-nested-elt (car notifications) '(params update toolCallId))
+                   (map-nested-elt (cadr notifications) '(params update toolCallId))))
+    (should (= (hash-table-count (map-elt client :tool-items)) 0))))
 
 (ert-deftest agent-shell-codex-app-server-hook-lifetimes-are-bounded-and-paired ()
   "Hook completions pair across timestamp seconds and lifecycle scope, and stay bounded."
-  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+  (let ((agent-shell-codex-app-server-show-hook-activity t)
+        (client (agent-shell-codex-app-server-make-client :command "sh"))
         notifications)
     (map-put! client :thread-id "root")
     (acp-subscribe-to-notifications :client client
@@ -287,6 +391,7 @@
       ;; A completion without a visible start gets its own card and no state.
       (agent-shell-codex-app-server-tests--hook client "hook/completed" "stop:0:/h" "turn" 125)
       (should-not (member (nth 2 (ids)) (list (nth 0 (ids)))))
+      (should (equal (nth 2 (ids)) (nth 3 (ids))))
       (should (= (hash-table-count (map-elt client :tool-items)) 0))
       ;; Thread-scoped lifecycle hooks have no turn and survive turn completion.
       (agent-shell-codex-app-server-tests--hook client "hook/started" "sessionStart:0:/h" nil 126)
@@ -294,7 +399,7 @@
        client '((method . "turn/completed")
                 (params . ((threadId . "root") (turn . ((id . "turn") (status . "completed")))))))
       (agent-shell-codex-app-server-tests--hook client "hook/completed" "sessionStart:0:/h" nil 126)
-      (should (equal (nth 3 (ids)) (nth 4 (ids))))
+      (should (equal (nth 4 (ids)) (nth 5 (ids))))
       (should (= (hash-table-count (map-elt client :tool-items)) 0)))
     ;; Runs whose completion never arrives are retained only up to the limit.
     (let ((agent-shell-codex-app-server--max-open-hook-runs 2))
