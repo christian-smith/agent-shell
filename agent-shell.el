@@ -1701,6 +1701,7 @@ Works from both shell and viewport buffers."
          (shell-dir (buffer-local-value 'default-directory shell-buffer))
          (pending-directory-cleanup
           (buffer-local-value 'agent-shell--pending-directory-cleanup shell-buffer))
+         (a2a-withdrawn (buffer-local-value 'agent-shell-a2a--auto-withdrawn shell-buffer))
          ;; Remember where the shell is currently displayed
          (windows (get-buffer-window-list shell-buffer nil t)))
     (with-current-buffer shell-buffer
@@ -1718,13 +1719,18 @@ Works from both shell and viewport buffers."
                     pending-directory-cleanup))
       (user-error "Cancelled"))
     (let* ((default-directory shell-dir)
-           (new-shell-buffer (agent-shell--start
-                              :config config
-                              :session-strategy strategy
-                              :session-id session-id
-                              :new-session t
-                              :no-focus t)))
+           ;; A shell withdrawn from A2A stays private after restarting.
+           (new-shell-buffer
+            (agent-shell-a2a--call-privately
+             a2a-withdrawn
+             (lambda ()
+               (agent-shell--start
+                :config config :session-strategy strategy :session-id session-id
+                :new-session t :no-focus t)))))
       (shell-maker-set-buffer-name new-shell-buffer shell-buffer-name)
+      (when a2a-withdrawn
+        (with-current-buffer new-shell-buffer
+          (setq agent-shell-a2a--auto-withdrawn t)))
       (when pending-directory-cleanup
         (with-current-buffer new-shell-buffer
           (setq-local agent-shell--pending-directory-cleanup
@@ -1779,17 +1785,23 @@ Works from both shell and viewport buffers."
          (supports-fork (map-elt (buffer-local-value 'agent-shell--state shell-buffer)
                                  :supports-session-fork))
          (config (map-elt (buffer-local-value 'agent-shell--state shell-buffer)
-                          :agent-config)))
+                          :agent-config))
+         (a2a-withdrawn (buffer-local-value 'agent-shell-a2a--auto-withdrawn shell-buffer)))
     (unless session-id
       (user-error "No active session to fork"))
     (unless supports-fork
       (user-error "Agent does not support session forking"))
-    (let ((new-shell-buffer (agent-shell--start
-                             :config config
-                             :session-strategy 'new
-                             :fork-session-id session-id
-                             :new-session t
-                             :no-focus t)))
+    ;; A fork shares the conversation, so it inherits A2A withdrawal.
+    (let ((new-shell-buffer
+           (agent-shell-a2a--call-privately
+            a2a-withdrawn
+            (lambda ()
+              (agent-shell--start
+               :config config :session-strategy 'new :fork-session-id session-id
+               :new-session t :no-focus t)))))
+      (when a2a-withdrawn
+        (with-current-buffer new-shell-buffer
+          (setq agent-shell-a2a--auto-withdrawn t)))
       (if (or from-viewport agent-shell-prefer-viewport-interaction)
           (agent-shell-viewport--show-buffer
            :shell-buffer new-shell-buffer)
@@ -7282,7 +7294,9 @@ DATA is an optional alist of event-specific data."
           (condition-case err
               (funcall (map-elt sub :on-event) event-alist)
             (error
-             (message "agent-shell: subscriber for %s errored: %S" event err))))))))
+             (message "agent-shell: subscriber for %s errored: %S" event err))))))
+    (when (memq event '(init-session init-finished))
+      (agent-shell-a2a--auto-expose (map-elt state :buffer)))))
 
 (defun agent-shell--active-input-accepted (event)
   "Emit accepted active-turn input from adapter EVENT.

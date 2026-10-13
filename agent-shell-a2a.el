@@ -3,9 +3,9 @@
 ;; This file is part of agent-shell and is licensed under the GPL-3.0-or-later.
 
 ;;; Commentary:
-;; Opt-in A2A 1.0 JSON-RPC endpoints for existing shell conversations.
+;; A2A 1.0 JSON-RPC endpoints for existing shell conversations.
 ;; The listener binds to IPv4 loopback only and requires a bearer token.
-;; Loading this library neither starts the listener nor exposes any shells.
+;; Initialized shells are exposed automatically unless automatic A2A is disabled.
 
 ;;; Code:
 
@@ -18,6 +18,7 @@
 
 (declare-function agent-shell--state "agent-shell")
 (declare-function agent-shell-buffers "agent-shell")
+(declare-function agent-shell-initialized-p "agent-shell")
 (declare-function agent-shell-subscribe-to "agent-shell")
 (declare-function agent-shell-unsubscribe "agent-shell")
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
@@ -32,6 +33,61 @@
 
 (defvar agent-shell-a2a--server nil
   "Running gateway state, or nil when stopped.")
+
+(defvar-local agent-shell-a2a--auto-withdrawn nil
+  "Non-nil when this shell was explicitly withdrawn from automatic A2A.")
+
+(defvar agent-shell-a2a--private-start-buffers nil
+  "Existing shell buffers wrapped in a list while constructing a private shell.
+Other shells initialized in that scope inherit withdrawal before exposure.")
+
+(defun agent-shell-a2a--call-privately (private function)
+  "Call FUNCTION, keeping each shell it creates withdrawn when PRIVATE.
+Shells are marked before any initialization event can expose them and
+again when FUNCTION returns or signals, so later asynchronous
+initialization stays private.  An enclosing private call keeps its
+snapshot, so nested starts cannot shorten its protection.  For example,
+restarting a withdrawn shell yields a withdrawn replacement."
+  (if (not (or private agent-shell-a2a--private-start-buffers))
+      (funcall function)
+    (let ((agent-shell-a2a--private-start-buffers
+           (or agent-shell-a2a--private-start-buffers
+               ;; Shells that already exist; any other buffer may become the clone.
+               (list (seq-filter (lambda (buffer)
+                                   (with-current-buffer buffer
+                                     (derived-mode-p 'agent-shell-mode)))
+                                 (buffer-list))))))
+      (unwind-protect
+          (funcall function)
+        (dolist (buffer (buffer-list))
+          (unless (memq buffer (car agent-shell-a2a--private-start-buffers))
+            (with-current-buffer buffer
+              (when (derived-mode-p 'agent-shell-mode)
+                (setq agent-shell-a2a--auto-withdrawn t)))))))))
+
+(defun agent-shell-a2a--set-auto-enable (symbol value)
+  "Set automatic A2A option SYMBOL to VALUE and update initialized shells."
+  (let ((previous (and (boundp symbol) (default-value symbol))))
+    (set-default symbol value)
+    (cond
+     ((and value (fboundp 'agent-shell-a2a--activate-auto))
+      (agent-shell-a2a--activate-auto))
+     ((and previous (not value) (fboundp 'agent-shell-a2a-stop))
+      (agent-shell-a2a-stop)))))
+
+(defcustom agent-shell-a2a-auto-enable t
+  "Automatically expose initialized Agent Shell buffers through local A2A.
+The listener is loopback-only and requires a bearer credential.  That
+credential grants access to each exposed shell's context and tool permissions.
+Set nil before loading Agent Shell to retain manual exposure only.  Changing
+this option from t to nil with Customize or `setopt' stops the gateway without
+interrupting agents.  Explicitly withdrawn shells stay private until exposed
+again with `agent-shell-a2a-expose'."
+  :type 'boolean
+  :group 'agent-shell
+  ;; Loading or reloading must not run the setter; see the end of this file.
+  :initialize #'custom-initialize-default
+  :set #'agent-shell-a2a--set-auto-enable)
 
 (defconst agent-shell-a2a--states
   '((submitted . "TASK_STATE_SUBMITTED")
@@ -464,7 +520,7 @@ For example, (agent-shell-a2a-start 9099).  No shells are exposed yet."
                        :log #'agent-shell-a2a--accept))
                 (cons :token token) (cons :agents nil) (cons :connections nil))))
   (add-hook 'agent-shell-codex-app-server-question-hook #'agent-shell-a2a--on-codex-question)
-  (message "A2A gateway listening on 127.0.0.1:%s; expose a shell with agent-shell-a2a-expose"
+  (message "A2A gateway listening on 127.0.0.1:%s"
            (process-contact (map-elt agent-shell-a2a--server :listener) :service)))
 
 ;;;###autoload
@@ -479,6 +535,7 @@ Return its base URL.  For example, (agent-shell-a2a-expose (current-buffer))."
                    (and (derived-mode-p 'agent-shell-mode)
                         (map-nested-elt (agent-shell--state) '(:session :id)))))
       (user-error "Select an initialized Agent Shell buffer"))
+    (with-current-buffer buffer (setq agent-shell-a2a--auto-withdrawn nil))
     (let ((agent (seq-find (lambda (entry) (eq buffer (map-elt entry :buffer)))
                            (map-elt agent-shell-a2a--server :agents))))
       (when (and agent
@@ -506,10 +563,8 @@ Return its base URL.  For example, (agent-shell-a2a-expose (current-buffer))."
         (message "Exposed %s at %s" (buffer-name buffer) (agent-shell-a2a--base-url agent)))
       (agent-shell-a2a--base-url agent))))
 
-;;;###autoload
-(defun agent-shell-a2a-unexpose (&optional shell-buffer)
-  "Withdraw SHELL-BUFFER, or the current shell, without interrupting its agent."
-  (interactive)
+(defun agent-shell-a2a--withdraw-buffer (shell-buffer)
+  "Withdraw SHELL-BUFFER without changing its automatic exposure preference."
   (when-let* ((agent (seq-find
                       (lambda (entry) (eq (or shell-buffer (current-buffer))
                                            (map-elt entry :buffer)))
@@ -522,12 +577,54 @@ Return its base URL.  For example, (agent-shell-a2a-expose (current-buffer))."
               (delq agent (map-elt agent-shell-a2a--server :agents)))))
 
 ;;;###autoload
-(defun agent-shell-a2a-stop ()
-  "Stop the gateway without stopping Emacs or interrupting any agent turns."
+(defun agent-shell-a2a-unexpose (&optional shell-buffer)
+  "Withdraw SHELL-BUFFER, or the current shell, without interrupting its agent.
+Keep it private from automatic exposure until `agent-shell-a2a-expose' is used."
   (interactive)
+  (let ((buffer (or shell-buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (derived-mode-p 'agent-shell-mode)
+          (setq agent-shell-a2a--auto-withdrawn t))))
+    (agent-shell-a2a--withdraw-buffer buffer)))
+
+(defun agent-shell-a2a--auto-expose (buffer)
+  "Automatically expose initialized BUFFER when automatic A2A is enabled."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'agent-shell-mode)
+                 agent-shell-a2a--private-start-buffers
+                 (not (memq buffer (car agent-shell-a2a--private-start-buffers))))
+        (setq agent-shell-a2a--auto-withdrawn t))
+      (when (and agent-shell-a2a-auto-enable (derived-mode-p 'agent-shell-mode)
+                 (not agent-shell-a2a--auto-withdrawn))
+        (condition-case err
+            (let ((agent (seq-find (lambda (entry) (eq buffer (map-elt entry :buffer)))
+                                  (map-elt agent-shell-a2a--server :agents)))
+                  (session (map-nested-elt (agent-shell--state) '(:session :id))))
+              (when (and agent (not (equal session (map-elt agent :session-id))))
+                (agent-shell-a2a--withdraw-buffer buffer))
+              (when (and session (agent-shell-initialized-p :shell-buffer buffer))
+                (agent-shell-a2a-expose buffer)))
+          (error (display-warning 'agent-shell-a2a
+                                  (format "Automatic A2A exposure failed: %s" (error-message-string err)))))))))
+
+(defun agent-shell-a2a--activate-auto ()
+  "Expose existing initialized shells when automatic A2A is enabled."
+  (when (and agent-shell-a2a-auto-enable (fboundp 'agent-shell-buffers))
+    (dolist (buffer (agent-shell-buffers))
+      (agent-shell-a2a--auto-expose buffer))))
+
+;;;###autoload
+(defun agent-shell-a2a-stop ()
+  "Stop the gateway without stopping Emacs or interrupting any agent turns.
+Interactive use disables automatic A2A for the rest of this Emacs session."
+  (interactive)
+  (when (called-interactively-p 'any)
+    (setq agent-shell-a2a-auto-enable nil))
   (when agent-shell-a2a--server
     (dolist (agent (copy-sequence (map-elt agent-shell-a2a--server :agents)))
-      (agent-shell-a2a-unexpose (map-elt agent :buffer)))
+      (agent-shell-a2a--withdraw-buffer (map-elt agent :buffer)))
     (dolist (connection (copy-sequence (map-elt agent-shell-a2a--server :connections)))
       (agent-shell-a2a--close connection))
     (delete-process (map-elt agent-shell-a2a--server :listener))
@@ -1081,6 +1178,9 @@ Unauthorized requests are answered from their head alone."
               (process-put process :deadline (run-at-time 300 nil #'agent-shell-a2a--close process))
               (agent-shell-a2a--route process head data))))
       (error (agent-shell-a2a--http-response process "400 Bad Request" '((error . "Invalid HTTP request")))))))
+
+(with-eval-after-load 'agent-shell
+  (agent-shell-a2a--activate-auto))
 
 (provide 'agent-shell-a2a)
 ;;; agent-shell-a2a.el ends here

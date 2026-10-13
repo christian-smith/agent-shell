@@ -15,6 +15,285 @@
 (defvar agent-shell-a2a-tests--sent nil)
 (defvar agent-shell-a2a-tests--interrupted nil)
 
+(defmacro agent-shell-a2a-tests--with-auto-shell (&rest body)
+  "Run BODY with an uninitialized in-memory shell and automatic A2A."
+  (declare (indent 0) (debug t))
+  `(let ((agent-shell-a2a--server nil)
+         (agent-shell-a2a-auto-enable t)
+         (agent-shell-inhibit-system-sleep nil)
+         (shell (generate-new-buffer " *a2a-auto-shell*"))
+         (nonce 0))
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-shell-a2a--nonce)
+                    (lambda () (format "%064x" (cl-incf nonce))))
+                   ((symbol-function 'agent-shell-buffers) (lambda () (list shell))))
+           (with-current-buffer shell
+             (setq-local major-mode 'agent-shell-mode)
+             (setq-local agent-shell--state
+                         `((:buffer . ,shell) (:session . nil) (:init-finished . nil)
+                           (:event-subscriptions . nil) (:agent-config . nil)
+                           (:supports-session-fork . nil))))
+           ,@body)
+       (agent-shell-a2a-stop)
+       (when (buffer-live-p shell) (kill-buffer shell)))))
+
+(ert-deftest agent-shell-a2a-auto-exposure-waits-for-initialization ()
+  "Automatic A2A waits for readiness and reuses the gateway and shell identity."
+  (agent-shell-a2a-tests--with-auto-shell
+    (with-current-buffer shell
+      (agent-shell--emit-event :event 'init-started)
+      (should-not agent-shell-a2a--server)
+      (setf (map-elt agent-shell--state :session) '((:id . "session")))
+      (agent-shell--emit-event :event 'init-session)
+      (should-not agent-shell-a2a--server)
+      (setf (map-elt agent-shell--state :init-finished) t)
+      (agent-shell--emit-event :event 'init-finished)
+      (let ((server agent-shell-a2a--server)
+            (agent (car (map-elt agent-shell-a2a--server :agents))))
+        (should (process-live-p (map-elt server :listener)))
+        (should (equal (process-contact (map-elt server :listener) :host) "127.0.0.1"))
+        (should (= (length (map-elt agent-shell--state :event-subscriptions)) 1))
+        (agent-shell-a2a--activate-auto)
+        (agent-shell--emit-event :event 'init-finished)
+        (should (eq server agent-shell-a2a--server))
+        (should (equal (map-elt server :agents) (list agent)))
+        (should (= (length (map-elt agent-shell--state :event-subscriptions)) 1))))))
+
+(ert-deftest agent-shell-a2a-auto-exposure-respects-withdrawal ()
+  "Explicit withdrawal survives automatic refresh and new session events."
+  (agent-shell-a2a-tests--with-auto-shell
+    (with-current-buffer shell
+      (setf (map-elt agent-shell--state :session) '((:id . "session"))
+            (map-elt agent-shell--state :init-finished) t)
+      (agent-shell-a2a--activate-auto)
+      (agent-shell-a2a-unexpose)
+      (should-not (map-elt agent-shell-a2a--server :agents))
+      (agent-shell--emit-event :event 'init-finished)
+      (agent-shell-a2a--activate-auto)
+      (should-not (map-elt agent-shell-a2a--server :agents))
+      (agent-shell-a2a-expose)
+      (should (= (length (map-elt agent-shell-a2a--server :agents)) 1)))))
+
+(ert-deftest agent-shell-a2a-auto-exposure-follows-session-identity ()
+  "Session replacement retires old exposure before making the new shell available."
+  (agent-shell-a2a-tests--with-auto-shell
+    (with-current-buffer shell
+      (setf (map-elt agent-shell--state :session) '((:id . "old"))
+            (map-elt agent-shell--state :init-finished) t)
+      (agent-shell-a2a--activate-auto)
+      (let ((agent (car (map-elt agent-shell-a2a--server :agents))))
+        (setf (map-elt agent-shell--state :session) '((:id . "new"))
+              (map-elt agent-shell--state :init-finished) nil)
+        (agent-shell--emit-event :event 'init-session)
+        (should-not (map-elt agent-shell-a2a--server :agents))
+        (setf (map-elt agent-shell--state :init-finished) t)
+        (agent-shell--emit-event :event 'init-finished)
+        (let ((replacement (car (map-elt agent-shell-a2a--server :agents))))
+          (should (equal (map-elt replacement :session-id) "new"))
+          (should-not (equal (map-elt agent :id) (map-elt replacement :id))))))))
+
+(ert-deftest agent-shell-a2a-auto-option-controls-existing-shells ()
+  "Customizing automatic A2A enables existing shells and stops without interrupting."
+  (agent-shell-a2a-tests--with-auto-shell
+    (with-current-buffer shell
+      (setf (map-elt agent-shell--state :session) '((:id . "session"))
+            (map-elt agent-shell--state :init-finished) t)
+      (setq agent-shell-a2a-auto-enable nil)
+      (agent-shell--emit-event :event 'init-finished)
+      (should-not agent-shell-a2a--server)
+      (agent-shell-a2a--set-auto-enable 'agent-shell-a2a-auto-enable t)
+      (let ((listener (map-elt agent-shell-a2a--server :listener)))
+        (cl-letf (((symbol-function 'agent-shell-interrupt)
+                   (lambda (&rest _) (ert-fail "Disabling A2A interrupted an agent"))))
+          (agent-shell-a2a--set-auto-enable 'agent-shell-a2a-auto-enable nil))
+        (should-not agent-shell-a2a--server)
+        (should-not (process-live-p listener)))
+      ;; Disabling automatic exposure still permits explicit manual exposure.
+      (agent-shell-a2a-expose)
+      (should (map-elt agent-shell-a2a--server :agents)))))
+
+(ert-deftest agent-shell-a2a-interactive-stop-disables-auto-restart ()
+  "An explicit stop isn't undone by a later initialization event."
+  (agent-shell-a2a-tests--with-auto-shell
+    (with-current-buffer shell
+      (setf (map-elt agent-shell--state :session) '((:id . "session"))
+            (map-elt agent-shell--state :init-finished) t)
+      (agent-shell-a2a--activate-auto)
+      (call-interactively #'agent-shell-a2a-stop)
+      (should-not agent-shell-a2a-auto-enable)
+      (agent-shell--emit-event :event 'init-finished)
+      (should-not agent-shell-a2a--server))))
+
+(ert-deftest agent-shell-a2a-auto-start-failure-does-not-break-initialization ()
+  "A failed secure startup reports a warning while leaving the shell ready."
+  (agent-shell-a2a-tests--with-auto-shell
+    (with-current-buffer shell
+      (setf (map-elt agent-shell--state :session) '((:id . "session"))
+            (map-elt agent-shell--state :init-finished) t)
+      (let (warning)
+        (cl-letf (((symbol-function 'agent-shell-a2a--nonce) (lambda () (error "Random source unavailable")))
+                  ((symbol-function 'display-warning)
+                   (lambda (_type message &rest _) (setq warning message))))
+          (agent-shell--emit-event :event 'init-finished))
+        (should (string-match-p "Random source unavailable" warning))
+        (should-not agent-shell-a2a--server)
+        (should (agent-shell-initialized-p))))))
+
+(ert-deftest agent-shell-a2a-reload-does-not-activate-gateway-test ()
+  "Reloading the gateway runs no automatic activation through its option setter."
+  (let ((file (symbol-file 'agent-shell-a2a--steer 'defun)))
+    (with-temp-buffer
+      (let ((status
+             (call-process
+              (expand-file-name invocation-name invocation-directory) nil t nil
+              "--batch" "-Q" "-L" (file-name-directory file) "--eval"
+              (prin1-to-string
+               `(progn
+                  (setq native-comp-enable-subr-trampolines nil
+                        load-prefer-newer t)
+                  (require 'agent-shell-a2a)
+                  ;; One initialized shell would be exposed by any activation.
+                  (let ((shell (generate-new-buffer " *a2a-reload-shell*")))
+                    (with-current-buffer shell
+                      (setq-local major-mode 'agent-shell-mode))
+                    (fset 'agent-shell-buffers (lambda () (list shell)))
+                    (fset 'agent-shell--state (lambda () '((:session . ((:id . "session"))))))
+                    (fset 'agent-shell-initialized-p (lambda (&rest _) t))
+                    (fset 'agent-shell-subscribe-to (lambda (&rest _) 'subscription))
+                    (fset 'display-warning #'ignore)
+                    (load ,file nil t t)
+                    (when agent-shell-a2a--server
+                      (error "Reloading the gateway started a listener"))
+                    (princ "Reload left the gateway stopped")))))))
+        (ert-info ((buffer-string)) (should (equal status 0)))))))
+
+(ert-deftest agent-shell-a2a-withdrawal-survives-restart-and-fork-test ()
+  "Restarting or forking a withdrawn shell keeps the new shell private."
+  (dolist (command '(agent-shell-restart agent-shell-fork))
+    (dolist (withdrawn '(t nil))
+      (let ((old (generate-new-buffer " *a2a-withdrawn-shell*"))
+            (new (generate-new-buffer " *a2a-new-shell*")))
+        (unwind-protect
+            (progn
+              (with-current-buffer old
+                (setq-local major-mode 'agent-shell-mode)
+                (setq-local agent-shell--state
+                            '((:session . ((:id . "session"))) (:supports-session-fork . t)
+                              (:agent-config . nil) (:active-requests . nil)))
+                (setq agent-shell-a2a--auto-withdrawn withdrawn))
+              (cl-letf (((symbol-function 'agent-shell--current-shell) (lambda () old))
+                        ((symbol-function 'agent-shell--start) (lambda (&rest _) new))
+                        ((symbol-function 'shell-maker-set-buffer-name) #'ignore)
+                        ((symbol-function 'agent-shell--display-buffer) #'ignore)
+                        ((symbol-function 'agent-shell-viewport--show-buffer) #'ignore))
+                (funcall command))
+              (should (eq (buffer-local-value 'agent-shell-a2a--auto-withdrawn new) withdrawn)))
+          (dolist (buffer (list old new))
+            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
+
+(ert-deftest agent-shell-a2a-private-clones-never-expose-during-start-test ()
+  "A withdrawn shell remains private even if initialization completes inside start."
+  (dolist (command '(agent-shell-restart agent-shell-fork))
+    (agent-shell-a2a-tests--with-auto-shell
+      (let ((new (generate-new-buffer " *a2a-synchronous-clone*"))
+            exposed)
+        (unwind-protect
+            (progn
+              (with-current-buffer shell
+                (setq agent-shell-a2a--auto-withdrawn t)
+                (setf (map-elt agent-shell--state :session) '((:id . "private")))
+                (map-put! agent-shell--state :supports-session-fork t))
+              (cl-letf (((symbol-function 'agent-shell--current-shell) (lambda () shell))
+                        ((symbol-function 'agent-shell--start)
+                         (lambda (&rest _)
+                           (with-current-buffer new
+                             (setq-local major-mode 'agent-shell-mode)
+                             (setq-local agent-shell--state
+                                         `((:buffer . ,new) (:session . ((:id . "clone")))
+                                           (:init-finished . t) (:event-subscriptions . nil)))
+                             (agent-shell--emit-event :event 'init-finished))
+                           (setq exposed (map-elt agent-shell-a2a--server :agents))
+                           new))
+                        ((symbol-function 'shell-maker-set-buffer-name) #'ignore)
+                        ((symbol-function 'agent-shell--display-buffer) #'ignore)
+                        ((symbol-function 'agent-shell-viewport--show-buffer) #'ignore))
+                (funcall command))
+              (should-not exposed)
+              (should (buffer-local-value 'agent-shell-a2a--auto-withdrawn new)))
+          (when (buffer-live-p new) (kill-buffer new)))))))
+
+(defun agent-shell-a2a-tests--make-shell (name session &optional initialized)
+  "Return a new in-memory shell buffer NAME with SESSION, optionally INITIALIZED."
+  (let ((buffer (generate-new-buffer name)))
+    (with-current-buffer buffer
+      (setq-local major-mode 'agent-shell-mode)
+      (setq-local agent-shell--state
+                  `((:buffer . ,buffer) (:session . ((:id . ,session)))
+                    (:init-finished . ,initialized) (:event-subscriptions . nil))))
+    buffer))
+
+(defun agent-shell-a2a-tests--finish-init (buffer)
+  "Mark BUFFER initialized and emit the core event."
+  (with-current-buffer buffer
+    (setf (map-elt agent-shell--state :init-finished) t)
+    (agent-shell--emit-event :event 'init-finished)))
+
+(ert-deftest agent-shell-a2a-private-construction-edge-cases-test ()
+  "Private clones stay private across errors, nesting, and option changes only."
+  (agent-shell-a2a-tests--with-auto-shell
+    (let (created)
+      (unwind-protect
+          (progn
+            ;; A start that fails before any event still leaves the clone private
+            ;; when its asynchronous initialization finishes later.
+            (should-error
+             (agent-shell-a2a--call-privately
+              t (lambda ()
+                  (push (agent-shell-a2a-tests--make-shell " *a2a-failed-clone*" "failed") created)
+                  (error "Start failed"))))
+            (agent-shell-a2a-tests--finish-init (car created))
+            (should-not agent-shell-a2a--server)
+            ;; A failure after a synchronous event keeps the earlier marking.
+            (should-error
+             (agent-shell-a2a--call-privately
+              t (lambda ()
+                  (push (agent-shell-a2a-tests--make-shell " *a2a-ready-clone*" "ready") created)
+                  (agent-shell-a2a-tests--finish-init (car created))
+                  (error "Display failed"))))
+            (should-not agent-shell-a2a--server)
+            ;; A pre-existing shell initializing during construction stays public.
+            (let ((other (agent-shell-a2a-tests--make-shell " *a2a-other-shell*" "other")))
+              (push other created)
+              (agent-shell-a2a--call-privately
+               t (lambda ()
+                   (push (agent-shell-a2a-tests--make-shell " *a2a-outer-clone*" "outer") created)
+                   ;; A nested ordinary start cannot end the outer protection.
+                   (agent-shell-a2a--call-privately
+                    nil (lambda ()
+                          (push (agent-shell-a2a-tests--make-shell " *a2a-nested-shell*" "nested") created)
+                          (agent-shell-a2a-tests--finish-init (cadr created))))
+                   (agent-shell-a2a-tests--finish-init other)))
+              (should (equal (mapcar (lambda (agent) (map-elt agent :buffer))
+                                     (map-elt agent-shell-a2a--server :agents))
+                             (list other)))
+              (should-not (buffer-local-value 'agent-shell-a2a--auto-withdrawn other)))
+            ;; Clones marked while automatic A2A was disabled stay private when enabled.
+            (setq agent-shell-a2a-auto-enable nil)
+            (agent-shell-a2a--call-privately
+             t (lambda ()
+                 (push (agent-shell-a2a-tests--make-shell " *a2a-disabled-clone*" "disabled") created)
+                 (agent-shell-a2a-tests--finish-init (car created))))
+            (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () created)))
+              (agent-shell-a2a--set-auto-enable 'agent-shell-a2a-auto-enable t))
+            (should (equal (mapcar (lambda (agent) (map-elt agent :buffer))
+                                   (map-elt agent-shell-a2a--server :agents))
+                           (list (car (last created 3)))))
+            (dolist (buffer created)
+              (unless (equal (buffer-name buffer) " *a2a-other-shell*")
+                (should (buffer-local-value 'agent-shell-a2a--auto-withdrawn buffer)))))
+        (dolist (buffer created)
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
 (ert-deftest agent-shell-a2a-direct-load-provides-delivery-guards-test ()
   "Exercise gateway-only loading without the core preloading its dependencies."
   ;; Test the gateway file this session loaded, not another copy on `load-path'.
@@ -173,7 +452,7 @@
   "Emit EVENT with DATA from fixture SHELL."
   (with-current-buffer shell (agent-shell--emit-event :event event :data data)))
 
-(ert-deftest agent-shell-a2a-is-opt-in-and-loopback-test ()
+(ert-deftest agent-shell-a2a-deferred-start-and-loopback-test ()
   (should-not agent-shell-a2a--server)
   (agent-shell-a2a-tests--with-gateway
     (should (equal (seq-take (process-contact (map-elt agent-shell-a2a--server :listener) :local) 4)
@@ -890,6 +1169,10 @@
         (map-put! agent-shell--state :agent-config `((:busy-prompt-handler . ,(lambda (event) (setq callback event) t)))))
       (let ((connection (agent-shell-a2a-tests--rpc "SendMessage"
                                                   (agent-shell-a2a-tests--send-params "message-2" (map-elt task 'id)))))
+        (let ((deadline (+ (float-time) 2)))
+          (while (and (not callback) (< (float-time) deadline))
+            (accept-process-output nil 0.01)))
+        (should callback)
         (agent-shell--active-input-accepted callback)
         (funcall (map-elt callback :on-success))
         (should (equal (map-nested-elt (agent-shell-a2a-tests--json connection) '(result task status state))

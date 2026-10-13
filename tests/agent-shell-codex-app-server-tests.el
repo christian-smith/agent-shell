@@ -8,6 +8,360 @@
 
 (defvar agent-shell--version)
 (defvar agent-shell--state)
+(declare-function agent-shell--build-content-blocks "agent-shell")
+
+(ert-deftest agent-shell-codex-app-server-translates-media-inputs ()
+  "ACP media inputs preserve local paths, URLs, and inline data."
+  (dolist (example '((((type . "image") (uri . "file:///tmp/image%20one.png"))
+                      ((type . "localImage") (path . "/tmp/image one.png")))
+                     (((type . "image") (uri . "https://example.com/image.png"))
+                      ((type . "image") (url . "https://example.com/image.png")))
+                     (((type . "image") (data . "aW1hZ2U=") (mimeType . "image/png"))
+                      ((type . "image") (url . "data:image/png;base64,aW1hZ2U=")))
+                     (((type . "audio") (uri . "file:///tmp/audio.wav"))
+                      ((type . "localAudio") (path . "/tmp/audio.wav")))
+                     (((type . "audio") (uri . "https://example.com/audio.wav"))
+                      ((type . "audio") (url . "https://example.com/audio.wav")))
+                     (((type . "audio") (data . "YXVkaW8=") (mimeType . "audio/wav"))
+                      ((type . "audio") (url . "data:audio/wav;base64,YXVkaW8=")))))
+    (should (equal (agent-shell-codex-app-server--translate-prompt-block (car example))
+                   (cadr example))))
+  (dolist (input '(((type . "image"))
+                   ((type . "audio") (data . "YXVkaW8="))
+                   ((type . "image") (data . "aW1hZ2U=") (mimeType . "audio/wav"))))
+    (should-error (agent-shell-codex-app-server--translate-prompt-block input) :type 'user-error)))
+
+(ert-deftest agent-shell-codex-app-server-audio-file-mentions-use-capability ()
+  "Audio mentions stay links in the core and become Codex audio only when supported."
+  (require 'agent-shell)
+  ;; Other agents keep their previous link behavior even when advertising audio.
+  (let ((agent-shell--state '((:prompt-capabilities . ((:audio . t) (:image . t))))))
+    (cl-letf (((symbol-function 'agent-shell--parse-file-mentions)
+               (lambda (_) '(((:start . 7) (:end . 18) (:path . "sample.wav")))))
+              ((symbol-function 'agent-shell-cwd) (lambda () "/tmp/"))
+              ((symbol-function 'agent-shell--resolve-path) #'identity)
+              ((symbol-function 'file-readable-p) (lambda (_) t))
+              ((symbol-function 'agent-shell--read-file-content)
+               (lambda (&rest _) '((:base64-p . t) (:mime-type . "audio/x-wav")
+                                   (:content . "YXVkaW8=") (:size . 8)))))
+      (let ((media (cadr (agent-shell--build-content-blocks "Listen @sample.wav"))))
+        (should (equal (map-elt media 'type) "resource_link"))
+        (should (equal (agent-shell-codex-app-server--translate-prompt-block media)
+                       '((type . "localAudio") (path . "/tmp/sample.wav")))))))
+  (dolist (example '(("file:///tmp/a.ogg" "application/octet-stream" "localAudio")
+                     ("file:///tmp/a.M4A" nil "localAudio")
+                     ("file:///tmp/a.flac" "audio/flac" "mention")
+                     ("file:///tmp/a.webm" "video/webm" "mention")))
+    (should (equal (map-elt (agent-shell-codex-app-server--translate-prompt-block
+                             `((type . "resource_link") (uri . ,(car example))
+                               (mimeType . ,(cadr example))))
+                            'type)
+                   (nth 2 example)))))
+
+(ert-deftest agent-shell-codex-app-server-initialize-advertises-audio ()
+  "The app-server adapter advertises the media inputs it can translate."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        response)
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-notification) #'ignore)
+              ((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+               (lambda (&rest args)
+                 (should (equal (plist-get args :method) "initialize"))
+                 (funcall (plist-get args :on-success) nil))))
+      (agent-shell-codex-app-server-send-request
+       :client client :request '((:method . "initialize"))
+       :on-success (lambda (result) (setq response result))))
+    (should (eq (map-nested-elt response '(agentCapabilities promptCapabilities audio)) t))
+    (should (eq (map-nested-elt response '(agentCapabilities promptCapabilities image)) t))))
+
+(ert-deftest agent-shell-codex-app-server-content-errors-fail-request ()
+  "Invalid inputs resolve the request's failure path before contacting Codex."
+  (dolist (input '(((type . "image")) ((type . "unknown"))
+                   ((type . "resource") (resource . ((blob . "data"))))))
+    (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+          failure)
+      (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+                 (lambda (&rest _) (ert-fail "Invalid input reached Codex"))))
+        (agent-shell-codex-app-server-send-request
+         :client client :request `((:method . "session/prompt") (:params . ((prompt . (,input)))))
+         :on-failure (lambda (error _raw) (setq failure error))))
+      (should (stringp (map-elt failure 'message)))
+      (should-not (map-elt client :pending-prompt)))))
+
+(ert-deftest agent-shell-codex-app-server-preserves-non-file-context ()
+  "Text resources and remote links must not turn into empty input blocks."
+  (should (equal (map-elt (agent-shell-codex-app-server--translate-prompt-block
+                           '((type . "resource") (resource . ((uri . "memory://context") (text . "Context")))))
+                          'text)
+                 "Context"))
+  (should (equal (map-elt (agent-shell-codex-app-server--translate-prompt-block
+                           '((type . "resource_link") (uri . "https://example.com") (name . "Documentation")))
+                          'text)
+                 "Documentation: https://example.com")))
+
+(ert-deftest agent-shell-codex-app-server-session-catalog-failure-is-terminal ()
+  "Catalog errors fail session creation/resume/fork without using stale models."
+  (dolist (method '("session/new" "session/resume" "session/load" "session/fork"))
+    (dolist (phase '(first-page later-page))
+      (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+            (error '((message . "Provider requirements changed; restart Codex")
+                     (data . ((code . -32600)))))
+            requests success failure)
+        (map-put! client :available-models '(((model . "existing"))))
+        (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+                   (lambda (&rest args)
+                     (push (plist-get args :method) requests)
+                     (should (equal (plist-get args :method) "model/list"))
+                     (if (and (eq phase 'later-page)
+                              (not (map-elt (plist-get args :params) 'cursor)))
+                         (funcall (plist-get args :on-success)
+                                  '((data . (((model . "partial")))) (nextCursor . "next")))
+                       (funcall (plist-get args :on-failure) error nil)))))
+          (agent-shell-codex-app-server-send-request
+           :client client :request `((:method . ,method)
+                                     (:params . ((sessionId . "thread") (cwd . "/tmp"))))
+           :on-success (lambda (_) (setq success t))
+           :on-failure (lambda (err _raw) (setq failure err))))
+        (should (equal failure error))
+        (should-not success)
+        (should (= (length requests) (if (eq phase 'first-page) 1 2)))
+        (should (equal (map-elt client :available-models) '(((model . "existing")))))))))
+
+(ert-deftest agent-shell-codex-app-server-catalog-errors-without-callback-are-reported ()
+  "A missing failure callback never converts catalog failure into success."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        success failure)
+    (acp-subscribe-to-errors :client client :on-error (lambda (err) (setq failure err)))
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+               (lambda (&rest args)
+                 (funcall (plist-get args :on-failure) '((message . "Catalog unavailable")) nil))))
+      (agent-shell-codex-app-server--fetch-models client (lambda () (setq success t))))
+    (should-not success)
+    (should (equal (map-elt failure 'message) "Catalog unavailable"))))
+
+(ert-deftest agent-shell-codex-app-server-sub-agent-resolved-model-metadata ()
+  "Spawn activity retains the resolved model and effort in the public update."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        delivered)
+    (acp-subscribe-to-notifications :client client :on-notification (lambda (event) (setq delivered event)))
+    (agent-shell-codex-app-server--handle-notification
+     client '((method . "item/started")
+              (params . ((item . ((id . "spawn") (type . "subAgentActivity") (kind . "started")
+                                  (agentPath . "/root/worker") (agentThreadId . "child")
+                                  (model . "resolved-model") (reasoningEffort . "high")))))))
+    (should (equal (map-nested-elt delivered '(params update rawInput model)) "resolved-model"))
+    (should (equal (map-nested-elt delivered '(params update rawInput reasoningEffort)) "high"))))
+
+(ert-deftest agent-shell-codex-app-server-hook-lifecycle-is-visible ()
+  "Hooks render progress and terminal output without leaking state or threads."
+  (dolist (status '("completed" "failed" "blocked" "stopped"))
+    (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+          notifications)
+      (map-put! client :thread-id "root")
+      (acp-subscribe-to-notifications :client client
+                                      :on-notification (lambda (event) (push event notifications)))
+      (dolist (thread '("child" "root"))
+        (dolist (method '("hook/started" "hook/completed"))
+          (agent-shell-codex-app-server--handle-notification
+           client `((method . ,method)
+                    (params . ((threadId . ,thread)
+                               (run . ((id . "check") (eventName . "PreToolUse") (handlerType . "command")
+                                       (executionMode . "sync") (sourcePath . "/tmp/hooks.json")
+                                       (status . ,(if (equal method "hook/started") "running" status))
+                                       (statusMessage . "Policy check")
+                                       (entries . (((kind . "warning") (text . "Warning detail"))))))))))))
+      (should (= (length notifications) 2))
+      (should (equal (map-nested-elt (cadr notifications) '(params update status)) "in_progress"))
+      (should (equal (map-nested-elt (car notifications) '(params update status))
+                     (if (equal status "completed") "completed" "failed")))
+      (should (string-prefix-p "hook/check/" (map-nested-elt (car notifications) '(params update toolCallId))))
+      (should (equal (map-nested-elt (car notifications) '(params update toolCallId))
+                     (map-nested-elt (cadr notifications) '(params update toolCallId))))
+      (should (equal (map-nested-elt (car notifications) '(params update title)) "Hook: PreToolUse"))
+      (should (equal (map-nested-elt (aref (map-nested-elt (car notifications) '(params update content)) 0)
+                                     '(content text)) "Policy check\nwarning: Warning detail"))
+      (should (= (hash-table-count (map-elt client :tool-items)) 0)))))
+
+(ert-deftest agent-shell-codex-app-server-repeated-hook-runs-stay-distinct ()
+  "Runs of one hook definition get separate tool calls, completed in order."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications)
+    (acp-subscribe-to-notifications :client client
+                                    :on-notification (lambda (event) (push event notifications)))
+    (dolist (method '("hook/started" "hook/started" "hook/completed" "hook/completed"))
+      (agent-shell-codex-app-server--handle-notification
+       client `((method . ,method)
+                (params . ((run . ((id . "preToolUse:0:/tmp/hooks.json") (eventName . "preToolUse")
+                                   (status . ,(if (equal method "hook/started") "running" "completed"))
+                                   (entries . []))))))))
+    (let ((ids (mapcar (lambda (event) (map-nested-elt event '(params update toolCallId)))
+                       (reverse notifications))))
+      (should-not (equal (nth 0 ids) (nth 1 ids)))
+      (should (equal (nth 2 ids) (nth 0 ids)))
+      (should (equal (nth 3 ids) (nth 1 ids))))
+    (should (= (hash-table-count (map-elt client :tool-items)) 0))))
+
+(ert-deftest agent-shell-codex-app-server-hook-order-is-independent-of-hash-order ()
+  "Completion chooses the oldest matching run even with reverse table iteration."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        (maphash-original (symbol-function 'maphash))
+        notifications)
+    (acp-subscribe-to-notifications :client client
+                                    :on-notification (lambda (event) (push event notifications)))
+    (dotimes (_ 2)
+      (agent-shell-codex-app-server--handle-notification
+       client '((method . "hook/started")
+                (params . ((turnId . "turn")
+                           (run . ((id . "stop:0:/tmp/hooks.json") (eventName . "stop")
+                                   (startedAt . 123) (status . "running"))))))))
+    (cl-letf (((symbol-function 'maphash)
+               (lambda (callback table)
+                 (let (entries)
+                   (funcall maphash-original (lambda (id entry) (push (cons id entry) entries)) table)
+                   (dolist (entry (seq-sort
+                                   (lambda (a b) (> (or (map-elt (cdr a) :hook-order) 0)
+                                                    (or (map-elt (cdr b) :hook-order) 0)))
+                                   entries))
+                     (funcall callback (car entry) (cdr entry)))))))
+      (agent-shell-codex-app-server--handle-notification
+       client '((method . "hook/completed")
+                (params . ((turnId . "turn")
+                           (run . ((id . "stop:0:/tmp/hooks.json") (eventName . "stop")
+                                   (startedAt . 123) (status . "completed"))))))))
+    (should (equal (map-nested-elt (car notifications) '(params update toolCallId))
+                   (map-nested-elt (nth 2 notifications) '(params update toolCallId))))
+    (agent-shell-codex-app-server--clear-tool-state client)))
+
+(ert-deftest agent-shell-codex-app-server-async-hooks-survive-turn-completion ()
+  "A late hook completion retains its card and cannot finish a newer turn's hook."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications)
+    (map-put! client :thread-id "root")
+    (acp-subscribe-to-notifications :client client
+                                    :on-notification (lambda (event) (push event notifications)))
+    (dolist (turn '("old" "new"))
+      (agent-shell-codex-app-server--handle-notification
+       client `((method . "hook/started")
+                (params . ((threadId . "root") (turnId . ,turn)
+                           (run . ((id . "stop:0:/tmp/hooks.json") (eventName . "stop")
+                                   (executionMode . "async") (startedAt . 123) (status . "running")))))))
+      (when (equal turn "old")
+        (agent-shell-codex-app-server--handle-notification
+         client '((method . "turn/completed")
+                  (params . ((threadId . "root") (turn . ((id . "old") (status . "completed")))))))
+        (should (= (hash-table-count (map-elt client :tool-items)) 1))))
+    (dolist (turn '("new" "old"))
+      (agent-shell-codex-app-server--handle-notification
+       client `((method . "hook/completed")
+                (params . ((threadId . "root") (turnId . ,turn)
+                           (run . ((id . "stop:0:/tmp/hooks.json") (eventName . "stop")
+                                   (executionMode . "async") (startedAt . 123) (status . "completed"))))))))
+    (let ((ids (mapcar (lambda (event) (map-nested-elt event '(params update toolCallId)))
+                       (reverse notifications))))
+      (should (= (length ids) 4))
+      (should (equal (nth 0 ids) (nth 3 ids)))
+      (should (equal (nth 1 ids) (nth 2 ids))))
+    (should (= (hash-table-count (map-elt client :tool-items)) 0))))
+
+(defun agent-shell-codex-app-server-tests--hook (client method id turn started-at)
+  "Send hook METHOD for CLIENT's run ID in TURN starting at STARTED-AT."
+  (agent-shell-codex-app-server--handle-notification
+   client `((method . ,method)
+            (params . ((threadId . "root") (turnId . ,turn)
+                       (run . ((id . ,id) (eventName . "stop") (startedAt . ,started-at)
+                               (status . ,(if (equal method "hook/started") "running" "completed")))))))))
+
+(ert-deftest agent-shell-codex-app-server-hook-lifetimes-are-bounded-and-paired ()
+  "Hook completions pair across timestamp seconds and lifecycle scope, and stay bounded."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications)
+    (map-put! client :thread-id "root")
+    (acp-subscribe-to-notifications :client client
+                                    :on-notification (lambda (event) (push event notifications)))
+    (cl-flet ((ids () (mapcar (lambda (event) (map-nested-elt event '(params update toolCallId)))
+                              (reverse notifications))))
+      ;; Codex may stamp the completed run in the next second.
+      (agent-shell-codex-app-server-tests--hook client "hook/started" "stop:0:/h" "turn" 123)
+      (agent-shell-codex-app-server-tests--hook client "hook/completed" "stop:0:/h" "turn" 124)
+      (should (equal (nth 0 (ids)) (nth 1 (ids))))
+      (should (= (hash-table-count (map-elt client :tool-items)) 0))
+      ;; A completion without a visible start gets its own card and no state.
+      (agent-shell-codex-app-server-tests--hook client "hook/completed" "stop:0:/h" "turn" 125)
+      (should-not (member (nth 2 (ids)) (list (nth 0 (ids)))))
+      (should (= (hash-table-count (map-elt client :tool-items)) 0))
+      ;; Thread-scoped lifecycle hooks have no turn and survive turn completion.
+      (agent-shell-codex-app-server-tests--hook client "hook/started" "sessionStart:0:/h" nil 126)
+      (agent-shell-codex-app-server--handle-notification
+       client '((method . "turn/completed")
+                (params . ((threadId . "root") (turn . ((id . "turn") (status . "completed")))))))
+      (agent-shell-codex-app-server-tests--hook client "hook/completed" "sessionStart:0:/h" nil 126)
+      (should (equal (nth 3 (ids)) (nth 4 (ids))))
+      (should (= (hash-table-count (map-elt client :tool-items)) 0)))
+    ;; Runs whose completion never arrives are retained only up to the limit.
+    (let ((agent-shell-codex-app-server--max-open-hook-runs 2))
+      (dotimes (index 3)
+        (agent-shell-codex-app-server-tests--hook
+         client "hook/started" (format "preToolUse:%d:/h" index) "interrupted" 127))
+      (agent-shell-codex-app-server--clear-tool-state client t)
+      (should (= (hash-table-count (map-elt client :tool-items)) 2))
+      (should-not (agent-shell-codex-app-server--oldest-hook-run client '("preToolUse:0:/h"))))
+    (agent-shell-codex-app-server--clear-tool-state client)))
+
+(ert-deftest agent-shell-codex-app-server-auth-recovery-does-not-finish-turn ()
+  "Authentication recovery notices show progress without resolving the prompt."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications completed)
+    (map-put! client :thread-id "root")
+    (map-put! client :active-turn-id "turn")
+    (map-put! client :pending-prompt `((:turn-id . "turn") (:on-success . ,(lambda (_) (setq completed t)))))
+    (acp-subscribe-to-notifications :client client :on-notification (lambda (event) (push event notifications)))
+    (dolist (thread '("child" "root"))
+      (dolist (method '("modelProvider/authRecoveryStarted" "modelProvider/authRecoveryCompleted"))
+        (agent-shell-codex-app-server--handle-notification
+         client `((method . ,method)
+                  (params . ((threadId . ,thread) (turnId . "turn") (provider . "openai")
+                             (message . "Authentication recovery")))))))
+    (should (= (length notifications) 2))
+    (should (equal (map-nested-elt (car notifications) '(params update content text))
+                   "Authentication recovery\n"))
+    (should-not completed)
+    (should (equal (map-elt client :active-turn-id) "turn"))))
+
+(ert-deftest agent-shell-codex-app-server-terminal-errors-are-reported ()
+  "Each terminal error is reported once, including interrupted-only errors."
+  (dolist (status '("failed" "interrupted"))
+    (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+          failures response)
+      (map-put! client :active-turn-id "turn")
+      (map-put! client :pending-prompt `((:turn-id . "turn") (:on-success . ,(lambda (result) (setq response result)))))
+      (acp-subscribe-to-errors :client client :on-error (lambda (err) (push err failures)))
+      (let ((error '((message . "Denial limit reached") (codexErrorInfo . "tooManyDenials"))))
+        ;; Codex sends a failed turn's error before completing it.
+        (when (equal status "failed")
+          (agent-shell-codex-app-server--handle-notification
+           client `((method . "error")
+                    (params . ((error . ,error) (willRetry . :false) (threadId . "root") (turnId . "turn"))))))
+        (agent-shell-codex-app-server--handle-notification
+         client `((method . "turn/completed")
+                  (params . ((turn . ((id . "turn") (status . ,status) (error . ,error))))))))
+      (should (= (length failures) 1))
+      (should (equal (map-elt (car failures) 'message) "Denial limit reached"))
+      (when (equal status "interrupted")
+        (should (equal (map-nested-elt (car failures) '(data codexErrorInfo)) "tooManyDenials")))
+      (should (equal (map-elt response 'stopReason) (if (equal status "failed") "refusal" "cancelled")))
+      (should-not (map-elt client :pending-prompt)))))
+
+(ert-deftest agent-shell-codex-app-server-auth-recovery-of-dismissed-turn-is-dropped ()
+  "A recovery notice from an interrupted turn is not shown in later output."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        notifications)
+    (map-put! client :thread-id "root")
+    (agent-shell-codex-app-server--dismiss-turn client "old-turn")
+    (acp-subscribe-to-notifications :client client :on-notification (lambda (event) (push event notifications)))
+    (agent-shell-codex-app-server--handle-notification
+     client '((method . "modelProvider/authRecoveryStarted")
+              (params . ((threadId . "root") (turnId . "old-turn") (provider . "openai")
+                         (message . "Authentication recovery")))))
+    (should-not notifications)))
 
 (ert-deftest agent-shell-codex-app-server-routes-acp-send-request ()
   "App-server clients should be handled via the ACP public API."
@@ -2235,7 +2589,7 @@ Sending them as empty strings would fail the server's typed schema."
           request-params
           response)
       (cl-letf (((symbol-function 'agent-shell-codex-app-server--fetch-models)
-                 (lambda (_client on-success)
+                 (lambda (_client on-success &optional _on-failure)
                    (funcall on-success)))
                 ((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
                  (lambda (&rest args)
@@ -2275,7 +2629,7 @@ Sending them as empty strings would fail the server's typed schema."
                        (setq disabled value)
                        (setq visual-wrap-prefix-mode nil)))
                     ((symbol-function 'agent-shell-codex-app-server--fetch-models)
-                     (lambda (_client _on-success))))
+                     (lambda (_client _on-success &optional _on-failure))))
             (agent-shell-codex-app-server-send-request
              :client client
              :request '((:method . "session/resume")
@@ -2293,7 +2647,7 @@ Sending them as empty strings would fail the server's typed schema."
         request-params
         response)
     (cl-letf (((symbol-function 'agent-shell-codex-app-server--fetch-models)
-               (lambda (_client on-success)
+               (lambda (_client on-success &optional _on-failure)
                  (funcall on-success)))
               ((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
                (lambda (&rest args)

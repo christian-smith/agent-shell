@@ -902,11 +902,11 @@ held up or dropped by the PTY line discipline."
 (defun agent-shell-codex-app-server--normalize-status (status)
   "Translate app-server STATUS into an agent-shell status string."
   (pcase status
-    ("inProgress" "in_progress")
+    ((or "inProgress" "running") "in_progress")
     ("completed" "completed")
     ("failed" "failed")
     ("declined" "failed")
-    ("interrupted" "failed")
+    ((or "interrupted" "blocked" "stopped") "failed")
     (_ (or status "in_progress"))))
 
 (defun agent-shell-codex-app-server--normalize-stop-reason (turn)
@@ -1266,7 +1266,11 @@ Use MODEL-ID and EFFORT to resolve the current mode."
          (:description . ,action)
          (:raw-input . ((description . ,action)
                         (agentPath . ,agent-path)
-                        (agentThreadId . ,(map-elt item 'agentThreadId)))))))
+                        (agentThreadId . ,(map-elt item 'agentThreadId))
+                        ,@(when-let* ((model (map-elt item 'model)))
+                            (list (cons 'model model)))
+                        ,@(when-let* ((effort (map-elt item 'reasoningEffort)))
+                            (list (cons 'reasoningEffort effort))))))))
     ("imageView"
      (let ((path (map-elt item 'path)))
        `((:title . ,(or path "View image"))
@@ -1679,10 +1683,26 @@ newest-first chunks to fill the display limit."
   (when (zerop (hash-table-count (map-elt client :pending-tool-output-items)))
     (agent-shell-codex-app-server--cancel-tool-output-flush client)))
 
-(defun agent-shell-codex-app-server--clear-tool-state (client)
-  "Discard all provider-side tool translation state for CLIENT."
+(defconst agent-shell-codex-app-server--max-open-hook-runs 64
+  "Open hook runs retained after a turn ends, awaiting late completion.")
+
+(defun agent-shell-codex-app-server--clear-tool-state (client &optional preserve-hooks)
+  "Discard provider-side tool translation state for CLIENT.
+When PRESERVE-HOOKS is non-nil, retain the newest open asynchronous hook
+runs, up to `agent-shell-codex-app-server--max-open-hook-runs'."
   (agent-shell-codex-app-server--clear-pending-tool-output client)
-  (clrhash (map-elt client :tool-items))
+  (if preserve-hooks
+      (let (hooks)
+        (maphash (lambda (item-id entry)
+                   (if (map-elt entry :hook-run)
+                       (push (cons (map-elt entry :hook-order) item-id) hooks)
+                     (remhash item-id (map-elt client :tool-items))))
+                 (map-elt client :tool-items))
+        ;; A run whose completion never arrives must not be kept forever.
+        (dolist (stale (nthcdr agent-shell-codex-app-server--max-open-hook-runs
+                               (seq-sort (lambda (a b) (> (car a) (car b))) hooks)))
+          (remhash (cdr stale) (map-elt client :tool-items))))
+    (clrhash (map-elt client :tool-items)))
   (clrhash (map-elt client :tool-outputs))
   (clrhash (agent-shell-codex-app-server--state-table
             client :citation-buffers)))
@@ -1854,6 +1874,40 @@ notification racing the `turn/start' reply, send at most one
      :on-success (lambda (_result) nil)
      :on-failure (lambda (_error _raw) nil))))
 
+(defconst agent-shell-codex-app-server--local-audio-extensions
+  '("wav" "mp3" "m4a" "webm" "ogg")
+  "File extensions Codex accepts as local audio input.")
+
+(defun agent-shell-codex-app-server--local-audio-p (path mime-type)
+  "Return non-nil when PATH with MIME-TYPE is local audio Codex accepts.
+Codex chooses the audio format by extension, so an unknown MIME-TYPE is
+accepted.  For example, \"/tmp/a.ogg\" qualifies, while \"/tmp/a.flac\"
+or a \".webm\" file typed \"video/webm\" does not."
+  (and (member (downcase (or (file-name-extension path) ""))
+               agent-shell-codex-app-server--local-audio-extensions)
+       (not (and (stringp mime-type)
+                 (string-match-p "\\`\\(?:video\\|image\\|text\\)/" mime-type)))))
+
+(defun agent-shell-codex-app-server--translate-media-input (block)
+  "Translate an ACP image or audio BLOCK into Codex media input.
+For example, inline PNG data becomes an image URL with a data URI."
+  (let* ((type (map-elt block 'type))
+         (uri (map-elt block 'uri))
+         (path (agent-shell-codex-app-server--file-uri-to-path uri)))
+    (cond
+     (path
+      `((type . ,(if (equal type "image") "localImage" "localAudio"))
+        (path . ,path)))
+     ((and (stringp uri) (not (string-empty-p uri)))
+      `((type . ,type) (url . ,uri)))
+     ((and (stringp (map-elt block 'data))
+           (not (string-empty-p (map-elt block 'data)))
+           (stringp (map-elt block 'mimeType))
+           (string-prefix-p (concat type "/") (map-elt block 'mimeType)))
+      `((type . ,type)
+        (url . ,(format "data:%s;base64,%s" (map-elt block 'mimeType) (map-elt block 'data)))))
+     (t (user-error "Codex %s input needs a URI or base64 data with a MIME type" type)))))
+
 (defun agent-shell-codex-app-server--translate-prompt-block (block)
   "Translate a single ACP content BLOCK into a Codex user input item."
   (pcase (map-elt block 'type)
@@ -1861,37 +1915,33 @@ notification racing the `turn/start' reply, send at most one
      `((type . "text")
        (text . ,(or (map-elt block 'text) ""))
        (textElements . [])))
-    ("image"
-     (if-let* ((path (agent-shell-codex-app-server--file-uri-to-path
-                      (map-elt block 'uri))))
-         `((type . "localImage")
-           (path . ,path))
-       `((type . "image")
-         (url . ,(map-elt block 'uri)))))
+    ((or "image" "audio")
+     (agent-shell-codex-app-server--translate-media-input block))
     ("resource"
-     (if-let* ((resource (map-elt block 'resource))
-               (uri (map-elt resource 'uri))
-               (path (agent-shell-codex-app-server--file-uri-to-path uri)))
-         `((type . "mention")
-           (name . ,(file-name-nondirectory path))
-           (path . ,path))
-       `((type . "text")
-         (text . "")
-         (textElements . []))))
+     (let* ((resource (map-elt block 'resource))
+            (path (agent-shell-codex-app-server--file-uri-to-path (map-elt resource 'uri))))
+       (cond
+        (path `((type . "mention") (name . ,(file-name-nondirectory path)) (path . ,path)))
+        ((stringp (map-elt resource 'text))
+         `((type . "text") (text . ,(map-elt resource 'text)) (textElements . [])))
+        (t (user-error "Codex cannot translate this embedded resource")))))
     ("resource_link"
      (if-let* ((path (agent-shell-codex-app-server--file-uri-to-path
                       (map-elt block 'uri))))
-         `((type . "mention")
-           (name . ,(or (map-elt block 'name)
-                        (file-name-nondirectory path)))
-           (path . ,path))
-       `((type . "text")
-         (text . "")
-         (textElements . []))))
+         ;; File mentions arrive as links; supported audio becomes model input.
+         (if (agent-shell-codex-app-server--local-audio-p path (map-elt block 'mimeType))
+             `((type . "localAudio") (path . ,path))
+           `((type . "mention")
+             (name . ,(or (map-elt block 'name)
+                          (file-name-nondirectory path)))
+             (path . ,path)))
+       (if-let* ((uri (map-elt block 'uri)) ((stringp uri)))
+           `((type . "text")
+             (text . ,(format "%s: %s" (or (map-elt block 'name) "Resource") uri))
+             (textElements . []))
+         (user-error "Codex resource link needs a URI"))))
     (_
-     `((type . "text")
-       (text . "")
-       (textElements . [])))))
+     (user-error "Unsupported Codex prompt content type: %s" (map-elt block 'type)))))
 
 (defun agent-shell-codex-app-server--translate-prompt-blocks (prompt-blocks)
   "Translate ACP PROMPT-BLOCKS to Codex app-server user input."
@@ -2527,7 +2577,9 @@ return any incomplete trailing text unchanged and discard the buffer."
                    "item/commandExecution/outputDelta"
                    "item/fileChange/outputDelta"
                    "item/mcpToolCall/progress"
-                   "item/completed")))
+                   "item/completed"
+                   "modelProvider/authRecoveryStarted"
+                   "modelProvider/authRecoveryCompleted")))
 
 (defun agent-shell-codex-app-server--dismissed-turn-notification-p (client
                                                                     notification)
@@ -2543,6 +2595,71 @@ return any incomplete trailing text unchanged and discard the buffer."
          (agent-shell-codex-app-server--dismissed-turn-id-p
           client
           (map-nested-elt notification '(params turnId))))))
+
+(defvar agent-shell-codex-app-server--hook-run-count 0
+  "Count of displayed hook runs, used to give each run its own tool call.")
+
+(defun agent-shell-codex-app-server--oldest-hook-run (client key)
+  "Return the ID of CLIENT's oldest open hook run whose identity begins with KEY.
+For example, KEY (ID TURN) matches runs of hook ID in TURN at any start time."
+  (let (oldest-id oldest-order)
+    (maphash (lambda (item-id entry)
+               (when-let* ((run (map-elt entry :hook-run))
+                           ((equal (seq-take run (length key)) key))
+                           ((or (not oldest-order)
+                                (< (map-elt entry :hook-order) oldest-order))))
+                 (setq oldest-id item-id oldest-order (map-elt entry :hook-order))))
+             (map-elt client :tool-items))
+    oldest-id))
+
+(defun agent-shell-codex-app-server--hook-item-id (client hook complete)
+  "Return CLIENT's tool call ID for a run of HOOK, completing it when COMPLETE.
+HOOK identifies the definition, turn, and start timestamp.  Each start gets
+a new ID; a completion closes the oldest matching open run.  For example,
+two runs of hook \"preToolUse:0:/x\" become distinct tool calls."
+  (or (and complete
+           (or (agent-shell-codex-app-server--oldest-hook-run client hook)
+               ;; Codex stamps a completed run's start separately from its
+               ;; announcement, so the second can differ.
+               (agent-shell-codex-app-server--oldest-hook-run client (butlast hook))))
+      (format "hook/%s/%d" (car hook)
+              (setq agent-shell-codex-app-server--hook-run-count
+                    (1+ agent-shell-codex-app-server--hook-run-count)))))
+
+(defun agent-shell-codex-app-server--handle-hook-notification (client notification)
+  "Translate a hook run in NOTIFICATION into a tool update for CLIENT."
+  (let* ((params (map-elt notification 'params))
+         (run (map-elt params 'run))
+         (hook (list (map-elt run 'id) (map-elt params 'turnId) (map-elt run 'startedAt)))
+         (complete (equal (map-elt notification 'method) "hook/completed"))
+         (item-id (agent-shell-codex-app-server--hook-item-id client hook complete))
+         (order (or (map-elt (gethash item-id (map-elt client :tool-items)) :hook-order)
+                    agent-shell-codex-app-server--hook-run-count))
+         (status (map-elt run 'status))
+         (title (format "Hook: %s" (map-elt run 'eventName)))
+         (text (string-join
+                (delq nil
+                      (cons (map-elt run 'statusMessage)
+                            (seq-map (lambda (entry)
+                                       (format "%s: %s" (map-elt entry 'kind) (or (map-elt entry 'text) "")))
+                                     (map-elt run 'entries))))
+                "\n"))
+         (item `((id . ,item-id)
+                 (result . ((content . (((type . "text") (text . ,text)))))))))
+    (puthash item-id
+             `((:title . ,title) (:kind . "other") (:status . ,status)
+               (:hook-run . ,hook) (:hook-order . ,order)
+               (:raw-input . ((eventName . ,(map-elt run 'eventName))
+                              (handlerType . ,(map-elt run 'handlerType))
+                              (executionMode . ,(map-elt run 'executionMode))
+                              (sourcePath . ,(map-elt run 'sourcePath)))))
+             (map-elt client :tool-items))
+    (unwind-protect
+        (agent-shell-codex-app-server--dispatch-notification
+         client
+         (agent-shell-codex-app-server--translate-tool-notification
+          (if complete "tool_call_update" "tool_call") client item status complete))
+      (when complete (agent-shell-codex-app-server--clear-tool-item client item-id)))))
 
 (defun agent-shell-codex-app-server--handle-notification (client notification)
   "Handle app-server NOTIFICATION for CLIENT."
@@ -2578,6 +2695,16 @@ return any incomplete trailing text unchanged and discard the buffer."
            params
            "Codex app-server notice")
           params)))
+      ((or "modelProvider/authRecoveryStarted" "modelProvider/authRecoveryCompleted")
+       (let ((params (or (map-elt notification 'params) '())))
+         (agent-shell-codex-app-server--dispatch-notification
+          client
+          `((method . "session/update")
+            (params . ((update . ((sessionUpdate . "agent_thought_chunk")
+                                  (content . ((type . "text")
+                                              (text . ,(concat (map-elt params 'message) "\n"))))))))))))
+      ((or "hook/started" "hook/completed")
+       (agent-shell-codex-app-server--handle-hook-notification client notification))
       ("model/rerouted"
        (let ((params (or (map-elt notification 'params) '())))
          (when (agent-shell-codex-app-server--notification-for-current-thread-p
@@ -2782,13 +2909,19 @@ return any incomplete trailing text unchanged and discard the buffer."
                      (and turn-id
                           current-turn-id
                           (not (equal turn-id current-turn-id))))
+           ;; A failed turn's error already arrived as an `error' notification;
+           ;; an interrupted turn's error (for example, tooManyDenials) did not.
+           (when-let* (((equal (map-elt turn 'status) "interrupted"))
+                       (error (map-elt turn 'error)))
+             (agent-shell-codex-app-server--call-error-handlers
+              client (agent-shell-codex-app-server--error-message-text error) error))
            (agent-shell-codex-app-server--clear-all-pending-permissions client)
            (unless (map-elt client :pending-prompt)
              (map-put! client :active-turn-id nil))
            (agent-shell-codex-app-server--respond-to-pending-prompt
             client
             turn)
-           (agent-shell-codex-app-server--clear-tool-state client))
+           (agent-shell-codex-app-server--clear-tool-state client t))
          (agent-shell-codex-app-server--dismiss-turn client turn-id)))
       (_ nil))))
 
@@ -3031,8 +3164,8 @@ Reuse CURSOR, COLLECTED, ON-SUCCESS, and ON-FAILURE until all pages are loaded."
    :on-failure (lambda (error raw)
                  (if on-failure
                      (funcall on-failure error raw)
-                   (when on-success
-                     (funcall on-success))))))
+                   (agent-shell-codex-app-server--call-error-handlers
+                    client (agent-shell-codex-app-server--error-message-text error) raw)))))
 
 (defun agent-shell-codex-app-server--fetch-models (client on-success &optional on-failure)
   "Refresh model metadata for CLIENT, then call ON-SUCCESS.
@@ -3208,6 +3341,7 @@ pages are loaded."
                                                            (resume . t)
                                                            (fork . t)))
                                    (agentCapabilities . ((promptCapabilities . ((image . t)
+                                                                                (audio . t)
                                                                                 (embeddedContext . nil)))))))))
         :on-failure on-failure))
       ("authenticate"
@@ -3231,7 +3365,8 @@ pages are loaded."
                                      client result))
                            (agent-shell-codex-app-server--ensure-session-title-slot
                             client)))
-           :on-failure on-failure))))
+           :on-failure on-failure))
+        on-failure))
       ("session/list"
        (agent-shell-codex-app-server--list-threads-page
         :client client
@@ -3266,7 +3401,8 @@ pages are loaded."
                                      client result))
                            (agent-shell-codex-app-server--ensure-session-title-slot
                             client)))
-           :on-failure on-failure))))
+           :on-failure on-failure))
+        on-failure))
       ("session/fork"
        (agent-shell-codex-app-server--fetch-models
         client
@@ -3288,7 +3424,8 @@ pages are loaded."
                                      client result))
                            (agent-shell-codex-app-server--ensure-session-title-slot
                             client)))
-           :on-failure on-failure))))
+           :on-failure on-failure))
+        on-failure))
       ("session/set_model"
        (let* ((model-id (map-elt params 'modelId))
               (resolved-effort
@@ -3371,38 +3508,46 @@ pages are loaded."
              (agent-shell-codex-app-server--call-error-handlers
               client
               "A prompt is already in progress"))
-         (agent-shell-codex-app-server--send-rpc-request
-          :client client
-          :method "turn/start"
-          :buffer buffer
-          :params `((threadId . ,(or (map-elt client :thread-id)
-                                     (map-elt params 'sessionId)))
-                    (input . ,(agent-shell-codex-app-server--translate-prompt-blocks
-                               (map-elt params 'prompt)))
-                    ,@(when-let* ((model-id (map-elt client :current-model-id)))
-                        (list (cons 'model model-id)))
-                    ,@(when-let* ((effort (map-elt client :reasoning-effort)))
-                        (list (cons 'effort effort))))
-          :on-success (lambda (result)
-                        (let ((turn-id (map-nested-elt result '(turn id))))
-                          (if (agent-shell-codex-app-server--dismissed-turn-id-p
-                               client turn-id)
-                              ;; The turn was interrupted or completed before
-                              ;; its start reply arrived, so no turn/completed
-                              ;; is left to resolve the prompt.
-                              (when on-success
-                                (funcall on-success
-                                         (agent-shell-codex-app-server--prompt-response
-                                          client
-                                          (agent-shell-codex-app-server--cancelled-turn
-                                           turn-id))))
-                            (map-put! client :active-turn-id turn-id)
-                            (map-put! client :pending-prompt
-                                      `((:turn-id . ,turn-id)
-                                        (:buffer . ,buffer)
-                                        (:on-success . ,on-success)
-                                        (:on-failure . ,on-failure))))))
-          :on-failure on-failure)))
+         (let (input input-error)
+           (condition-case err
+               (setq input (agent-shell-codex-app-server--translate-prompt-blocks
+                            (map-elt params 'prompt)))
+             (error (setq input-error (error-message-string err))))
+           (if input-error
+               (if on-failure
+                   (funcall on-failure (agent-shell-codex-app-server--make-error input-error) nil)
+                 (agent-shell-codex-app-server--call-error-handlers client input-error))
+             (agent-shell-codex-app-server--send-rpc-request
+              :client client
+              :method "turn/start"
+              :buffer buffer
+              :params `((threadId . ,(or (map-elt client :thread-id)
+                                         (map-elt params 'sessionId)))
+                        (input . ,input)
+                        ,@(when-let* ((model-id (map-elt client :current-model-id)))
+                            (list (cons 'model model-id)))
+                        ,@(when-let* ((effort (map-elt client :reasoning-effort)))
+                            (list (cons 'effort effort))))
+              :on-success (lambda (result)
+                            (let ((turn-id (map-nested-elt result '(turn id))))
+                              (if (agent-shell-codex-app-server--dismissed-turn-id-p
+                                   client turn-id)
+                                  ;; The turn was interrupted or completed before
+                                  ;; its start reply arrived, so no turn/completed
+                                  ;; is left to resolve the prompt.
+                                  (when on-success
+                                    (funcall on-success
+                                             (agent-shell-codex-app-server--prompt-response
+                                              client
+                                              (agent-shell-codex-app-server--cancelled-turn
+                                               turn-id))))
+                                (map-put! client :active-turn-id turn-id)
+                                (map-put! client :pending-prompt
+                                          `((:turn-id . ,turn-id)
+                                            (:buffer . ,buffer)
+                                            (:on-success . ,on-success)
+                                            (:on-failure . ,on-failure))))))
+              :on-failure on-failure)))))
       (_
        (if on-failure
            (funcall on-failure
@@ -3527,7 +3672,7 @@ Use REQUEST-ID with OPTION-ID or CANCELLED to pick the response."
          (turn-id (agent-shell-codex-app-server--current-turn-id client)))
     (map-put! client :pending-agent-message nil)
     (agent-shell-codex-app-server--cancel-pending-turn-start client)
-    (agent-shell-codex-app-server--clear-tool-state client)
+    (agent-shell-codex-app-server--clear-tool-state client t)
     (map-put! client :pending-prompt nil)
     (map-put! client :active-turn-id nil)
     (when pending
