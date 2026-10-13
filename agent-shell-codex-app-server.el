@@ -1337,25 +1337,28 @@ Use MODEL-ID and EFFORT to resolve the current mode."
 
 Answers steer the originating shell's active turn or submit a new prompt.
 If Codex rejects a steer, keep the question available for retry."
-  (let ((client (map-elt context :client))
-        (enable-recursive-minibuffers t)
+  (let ((enable-recursive-minibuffers t)
         submitted)
     (unless (eq (map-elt context :status) 'pending)
       (user-error "These questions are already answered or dismissed"))
     (setf (map-elt context :status) 'answering)
     (unwind-protect
-        (let ((answers
-               (seq-map
-                (lambda (question)
-                  (let ((answer ""))
-                    (while (string-empty-p (string-trim answer))
-                      (setq answer
-                            (completing-read
-                             (concat (map-elt question 'title) " ")
-                             (map-elt question 'options) nil nil)))
-                    (concat (map-elt question 'title) "\n" answer)))
-                (map-elt context :questions)))
-              (shell (map-elt client :context-buffer)))
+        (let* ((answers
+                (seq-map
+                 (lambda (question)
+                   (let ((answer ""))
+                     (while (string-empty-p (string-trim answer))
+                       (setq answer
+                             (completing-read
+                              (concat (map-elt question 'title) " ")
+                              (map-elt question 'options) nil nil)))
+                     (concat (map-elt question 'title) "\n" answer)))
+                 (map-elt context :questions)))
+               (client (map-elt context :client))
+               (shell (map-elt client :context-buffer)))
+          ;; A reconnecting client refuses prompts, which would lose the answer.
+          (when (map-elt client :reconnecting)
+            (user-error "Wait for the Codex reconnect to finish, then answer again"))
           (unless (and (eq (map-elt context :status) 'answering)
                        (buffer-live-p shell)
                        (not (map-elt client :shutting-down))
@@ -3574,6 +3577,7 @@ not the account selected on disk by an external account switcher."
   "Reconnect an idle Codex shell using the credentials currently on disk.
 Run `codex-auth switch' first, then invoke this command in the shell.
 Preserve the buffer and resume its thread without replaying history.
+Keep asynchronous questions answerable on the resumed connection.
 Background terminals and browser connections may not survive reconnecting."
   (interactive)
   (let* ((shell (current-buffer))
@@ -3588,10 +3592,6 @@ Background terminals and browser connections may not survive reconnecting."
               (> (hash-table-count (map-elt old :pending-requests)) 0)
               (map-elt old :reconnecting))
       (user-error "Wait for the current requests or reconnect to finish"))
-    (when (seq-some (lambda (context)
-                     (memq (map-elt context :status) '(pending answering)))
-                   (hash-table-values (map-elt old :async-questions)))
-      (user-error "Answer or dismiss pending Codex questions before reconnecting"))
     (unless (yes-or-no-p "Reconnect Codex? Background terminals and browser connections may be lost. ")
       (user-error "Reconnect cancelled"))
     (let ((replacement
@@ -3643,6 +3643,16 @@ Background terminals and browser connections may not survive reconnecting."
                   (map-put! replacement :reconnecting t)
                   (dolist (key '(:notification-handlers :request-handlers :error-handlers))
                     (map-put! replacement key (map-elt old key)))
+                  ;; Keep any question the replacement saw, so replays stay deduplicated.
+                  (maphash (lambda (id context)
+                             (unless (gethash id (map-elt old :async-questions))
+                               (puthash id context (map-elt old :async-questions))))
+                           (map-elt replacement :async-questions))
+                  (map-put! replacement :async-questions (map-elt old :async-questions))
+                  (map-put! old :async-questions (make-hash-table :test #'equal))
+                  (maphash (lambda (_id context)
+                             (setf (map-elt context :client) replacement))
+                           (map-elt replacement :async-questions))
                   (map-put! state :client replacement)
                   (agent-shell-codex-app-server--synchronize-models replacement)
                   (agent-shell-codex-app-server--send-rpc-request
