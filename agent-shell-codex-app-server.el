@@ -68,6 +68,11 @@ and :questions contains the server's question titles and options.")
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
 (declare-function shell-maker-busy "shell-maker")
 (declare-function agent-shell--update-header-and-mode-line "agent-shell")
+(declare-function agent-shell--finish-output "agent-shell-prompt")
+(declare-function agent-shell-heartbeat-stop "agent-shell-heartbeat")
+(declare-function agent-shell--sync-system-sleep "agent-shell")
+(declare-function shell-maker--current-request-id "shell-maker")
+(defvar shell-maker--config)
 
 (defconst agent-shell-codex-app-server--tool-output-display-limit
   (* 256 1024)
@@ -3751,6 +3756,83 @@ not the account selected on disk by an external account switcher."
      :on-failure
      (lambda (&rest _error)
        (message "%s: Could not read the running Codex account" name)))))
+
+(defun agent-shell-codex-app-server--recovery-idle-p (state client)
+  "Return non-nil when STATE and CLIENT have no tracked work to recover."
+  (and (not (map-elt client :active-turn-id))
+       (not (map-elt client :pending-prompt))
+       (not (map-elt client :reconnecting))
+       (not (map-elt state :active-requests))
+       (= (hash-table-count (map-elt client :pending-requests)) 0)))
+
+;;;###autoload
+(defun agent-shell-codex-app-server-recover ()
+  "Repair an idle Codex shell's busy flag or missing input prompt.
+For example, use this when Codex has stopped but the shell still looks busy
+or its last output is read-only with no prompt below it.  Verify runtime
+status with `thread/read' before repairing the shell.  Preserve drafts,
+queued prompts, questions, and the running process; never submit queued
+input automatically.  Refuse active work: use `agent-shell-interrupt' to
+cancel a tracked turn first.  A failed or timed-out check changes nothing."
+  (interactive)
+  (let* ((shell (current-buffer))
+         (state (and (boundp 'agent-shell--state) agent-shell--state))
+         (client (map-elt state :client))
+         (thread (map-elt client :thread-id))
+         request-count finished timer success failure)
+    (unless (and (derived-mode-p 'agent-shell-mode)
+                 (agent-shell-codex-app-server-client-p client)
+                 thread (agent-shell-codex-app-server--client-started-p client))
+      (user-error "Use this command in a running Codex app-server shell"))
+    (unless (agent-shell-codex-app-server--recovery-idle-p state client)
+      (user-error "Codex has tracked work; interrupt the turn or wait for requests to finish first"))
+    (setq request-count (shell-maker--current-request-id))
+    (setq failure
+          (lambda (error &rest _raw)
+            (unless finished
+              (setq finished t)
+              (when timer (cancel-timer timer))
+              ;; Only remove this probe, never a later request or turn.
+              (let (ids)
+                (maphash (lambda (id pending)
+                           (when (eq (map-elt pending :on-success) success) (push id ids)))
+                         (map-elt client :pending-requests))
+                (dolist (id ids) (remhash id (map-elt client :pending-requests))))
+              (message "Codex recovery stopped: %s"
+                       (or (agent-shell-codex-app-server--error-message-text error)
+                           "Could not verify runtime status")))))
+    (setq success
+          (lambda (result)
+            (unless finished
+              (setq finished t)
+              (when timer (cancel-timer timer))
+              (if (not (and (buffer-live-p shell)
+                            (eq (buffer-local-value 'agent-shell--state shell) state)
+                            (eq (map-elt state :client) client)
+                            (equal (map-elt client :thread-id) thread)
+                            (equal (map-nested-elt result '(thread id)) thread)
+                            (equal (map-nested-elt result '(thread status type)) "idle")
+                            (agent-shell-codex-app-server--client-started-p client)
+                            (agent-shell-codex-app-server--recovery-idle-p state client)
+                            (with-current-buffer shell
+                              (= request-count (shell-maker--current-request-id)))))
+                  (message "Codex recovery stopped: thread is not idle or the shell changed")
+                (with-current-buffer shell
+                  (agent-shell-heartbeat-stop :heartbeat (map-elt state :heartbeat))
+                  (agent-shell--finish-output :config shell-maker--config :success nil)
+                  ;; No event follows recovery, so release sleep inhibition here.
+                  (agent-shell--sync-system-sleep state)
+                  (agent-shell--update-header-and-mode-line)
+                  (message "Codex shell recovered; draft and queued prompts retained"))))))
+    (condition-case err
+        (progn
+          (agent-shell-codex-app-server--send-rpc-request
+           :client client :buffer shell :method "thread/read"
+           :params `((threadId . ,thread)) :on-success success :on-failure failure)
+          (unless finished
+            (setq timer (run-at-time 10 nil failure "Runtime status check timed out"))
+            (message "Checking Codex runtime status...")))
+      (error (funcall failure (error-message-string err))))))
 
 (defun agent-shell-codex-app-server-reconnect ()
   "Reconnect an idle Codex shell using the credentials currently on disk.
