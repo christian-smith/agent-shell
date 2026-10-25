@@ -680,6 +680,53 @@ invisible across the update."
 
 ;;; delete-fragment
 
+(ert-deftest agent-shell-ui-delete-cached-fragment-avoids-search-test ()
+  "Deleting a known fragment does not rescan the conversation."
+  (with-temp-buffer
+    (agent-shell-ui-update-fragment
+     (agent-shell-ui-make-fragment-model
+      :namespace-id "ns" :block-id "one" :label-left "First" :body "Body"))
+    (cl-letf (((symbol-function 'text-property-search-backward)
+               (lambda (&rest _) (ert-fail "Cached deletion searched the buffer"))))
+      (agent-shell-ui-delete-fragment :namespace-id "ns" :block-id "one"))
+    (should (string-blank-p (buffer-string)))))
+
+(ert-deftest agent-shell-ui-delete-fragment-respects-narrowing-test ()
+  "A cached fragment outside the accessible region is left untouched."
+  (with-temp-buffer
+    (dolist (id '("one" "two"))
+      (agent-shell-ui-update-fragment
+       (agent-shell-ui-make-fragment-model
+        :namespace-id "ns" :block-id id :label-left id)))
+    (let ((before (buffer-string))
+          (start (marker-position (map-elt (agent-shell-ui--cached-block "ns-two") :start))))
+      (save-restriction
+        (narrow-to-region start (point-max))
+        (agent-shell-ui-delete-fragment :namespace-id "ns" :block-id "one"))
+      (should (equal before (buffer-string))))))
+
+(ert-deftest agent-shell-ui-create-new-skips-existing-fragment-search-test ()
+  "Explicit creation avoids a full-buffer lookup and preserves duplicates."
+  (with-temp-buffer
+    (let ((search (symbol-function 'text-property-search-backward))
+          (full-searches 0))
+      (cl-letf (((symbol-function 'text-property-search-backward)
+                 (lambda (property &rest args)
+                   (when (and (eq property 'agent-shell-ui-state) (nth 2 args))
+                     (setq full-searches (1+ full-searches)))
+                   (apply search property args))))
+        (dolist (label '("First" "Second"))
+          (agent-shell-ui-update-fragment
+           (agent-shell-ui-make-fragment-model
+            :namespace-id "ns" :block-id "one" :label-left label)
+           :create-new t)))
+      (should (= full-searches 0)))
+    (should (string-match-p "First" (buffer-string)))
+    (should (string-match-p "Second" (buffer-string)))
+    (agent-shell-ui-delete-fragment :namespace-id "ns" :block-id "one")
+    (should (string-match-p "First" (buffer-string)))
+    (should-not (string-match-p "Second" (buffer-string)))))
+
 (ert-deftest agent-shell-ui-delete-fragment-preserves-next-indicator-test ()
   "Deleting a fragment keeps the following fragment's leading indicator.
 

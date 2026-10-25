@@ -666,16 +666,22 @@ When NO-UNDO is non-nil, disable undo recording for this operation."
     (let* ((inhibit-read-only t)
            (buffer-undo-list (if no-undo t buffer-undo-list))
            (qualified-id (format "%s-%s" namespace-id block-id))
-           (match (save-mark-and-excursion
-                    (goto-char (point-max))
-                    (text-property-search-backward
-                     'agent-shell-ui-state nil
-                     (lambda (_ state)
-                       (equal (map-elt state :qualified-id) qualified-id))
-                     t))))
-      (when match
-        (let ((block-start (prop-match-beginning match))
-              (block-end (prop-match-end match)))
+           (cached (agent-shell-ui--cached-block qualified-id))
+           (match (unless cached
+                    (save-mark-and-excursion
+                      (goto-char (point-max))
+                      (text-property-search-backward
+                       'agent-shell-ui-state nil
+                       (lambda (_ state)
+                         (equal (map-elt state :qualified-id) qualified-id))
+                       t)))))
+      (when (or cached match)
+        (let ((block-start (if cached
+                              (marker-position (map-elt cached :start))
+                            (prop-match-beginning match)))
+              (block-end (if cached
+                             (marker-position (map-elt cached :end))
+                           (prop-match-end match))))
           ;; Remove trailing vertical space that's part of the block, but
           ;; stop at the next fragment's content.  The next fragment's
           ;; leading indicator (e.g. the "  " collapse placeholder) is
@@ -749,6 +755,7 @@ check could pass and hand back an inverted range."
               (start (marker-position (map-elt entry :start)))
               (end (marker-position (map-elt entry :end)))
               ((< start end))
+              ((<= (point-min) start))
               ((<= end (point-max)))
               ((agent-shell-ui--block-id-at start qualified-id))
               ((agent-shell-ui--block-id-at (1- end) qualified-id))

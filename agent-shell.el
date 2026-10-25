@@ -3605,11 +3605,13 @@ Clears STATE's `:expanded-activity-group'."
                         (cons :meta (map-nested-elt acp-notification '(params update _meta)))))
            (let* ((tool-call-id (map-nested-elt acp-notification '(params update toolCallId)))
                   (tool-call-labels (agent-shell-make-tool-call-label state tool-call-id))
+                  (new-tool-call (not (map-nested-elt state (list :tool-calls tool-call-id :group-id))))
                   (group-id (agent-shell--activity-group-id state tool-call-id))
                   (tool-call (map-nested-elt state `(:tool-calls ,tool-call-id))))
              (agent-shell--update-fragment
               :state state
               :block-id tool-call-id
+              :create-new new-tool-call
               :label-left (map-elt tool-call-labels :status)
               :label-right (map-elt tool-call-labels :title)
               :group-id group-id
@@ -3862,8 +3864,11 @@ Clears STATE's `:expanded-activity-group'."
              ;; Status is completed or failed so the user
              ;; likely selected one of: accepted/rejected/always.
              ;; Remove stale permission dialog.
-             (when (member (map-nested-elt acp-notification '(params update status))
-                           '("completed" "failed"))
+             (when (and (member (map-nested-elt acp-notification '(params update status))
+                                '("completed" "failed"))
+                        (map-nested-elt state (list :tool-calls
+                                                   (map-nested-elt acp-notification '(params update toolCallId))
+                                                   :permission-request-id)))
                ;; block-id must be the same as the one used as
                ;; agent-shell--update-fragment param by "session/request_permission".
                (agent-shell--delete-fragment :state state :block-id (format "permission-%s" (map-nested-elt acp-notification '(params update toolCallId)))))
@@ -3897,6 +3902,7 @@ Clears STATE's `:expanded-activity-group'."
                (agent-shell--update-fragment
                 :state state
                 :block-id (map-nested-elt acp-notification '(params update toolCallId))
+                :create-new tool-newly-grouped
                 :label-left (map-elt tool-call-labels :status)
                 :label-right (map-elt tool-call-labels :title)
                 :group-id group-id
@@ -7134,6 +7140,8 @@ Session events:
     nor accumulates the text.
   `turn-complete'         - Agent turn finished and prompt ready for input
     :data contains :stop-reason, :usage and :meta
+  `turn-failed'           - Agent turn request failed
+    :data contains :code and :message
   `session-title-changed' - Session title updated
     :data contains :title
   `session-restored'      - Reloaded session fully replayed and settled
@@ -9583,6 +9591,9 @@ Continue?" (agent-shell--prompt-queue-summary)))
                        (agent-shell--prompt-queue-display :skip-summary t)))))
      :on-failure (lambda (acp-error raw-message)
                    (agent-shell-status-display--prepare-completion t)
+                   (let ((data (list (cons :code (map-elt acp-error 'code))
+                                     (cons :message (map-elt acp-error 'message)))))
+                     (agent-shell--emit-event :event 'turn-failed :data data))
                    ;; A failed/interrupted turn may have stopped mid
                    ;; agent_message_chunk, leaving the transcript body
                    ;; without a trailing newline.  Separate it so the

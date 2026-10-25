@@ -10,6 +10,36 @@
 (defvar agent-shell--state)
 (declare-function agent-shell--build-content-blocks "agent-shell")
 
+(ert-deftest agent-shell-codex-app-server-decode-message-preserves-json-values ()
+  "Protocol objects use symbol keys, lists, and nil for false and null."
+  (let ((json-object-type 'hash-table)
+        (json-array-type 'vector)
+        (json-key-type 'string)
+        (json-false :false)
+        (json-null :null))
+    (should
+     (equal (agent-shell-codex-app-server--decode-message
+             "{\"id\":7,\"result\":{\"enabled\":true,\"disabled\":false,\"missing\":null,\"empty\":[],\"object\":{},\"items\":[{\"text\":\"hello\\nworld\"},2,0.5]}}")
+            '((id . 7)
+              (result (enabled . t) (disabled) (missing) (empty) (object)
+                      (items ((text . "hello\nworld")) 2 0.5)))))))
+
+(ert-deftest agent-shell-codex-app-server-decode-message-rejects-invalid-json ()
+  "Malformed protocol messages signal errors instead of being enqueued."
+  (dolist (line '("{" "{\"id\":}" "{\"id\":1} trailing"))
+    (should-error (agent-shell-codex-app-server--decode-message line))))
+
+(ert-deftest agent-shell-codex-app-server-process-filter-skips-blank-records ()
+  "Blank records are ignored without dropping the following JSON message."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        messages)
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--enqueue-message)
+               (lambda (_client message) (push message messages))))
+      (agent-shell-codex-app-server--process-filter
+       client " \t\r\n\n{\"id\":1}\n"))
+    (should (equal messages '(((id . 1)))))
+    (should (equal (map-elt client :partial-output) ""))))
+
 (ert-deftest agent-shell-codex-app-server-translates-media-inputs ()
   "ACP media inputs preserve local paths, URLs, and inline data."
   (dolist (example '((((type . "image") (uri . "file:///tmp/image%20one.png"))
@@ -1624,6 +1654,17 @@ Codex sends `TurnPlanUpdatedNotification' with the steps directly under
     (should (eq callback-buffer target-buffer))
     (should (equal stop-reason "end_turn"))
     (should-not (map-elt client :pending-prompt))))
+
+(ert-deftest agent-shell-codex-app-server-skips-echo-check-without-pending-echo ()
+  "Do not probe the PTY shell when no echoed request is pending."
+  (let ((client (agent-shell-codex-app-server-make-client
+                 :command "sh"
+                 :connection-type 'pty)))
+    (cl-letf (((symbol-function 'agent-shell-codex-app-server--track-pty-echo-p)
+               (lambda (_client)
+                 (error "Unexpected PTY shell probe"))))
+      (should-not
+       (agent-shell-codex-app-server--consume-echoed-line client "{}")))))
 
 (ert-deftest agent-shell-codex-app-server-ignores-pty-echoed-requests ()
   "Echoed PTY input should be discarded before JSON-RPC routing."

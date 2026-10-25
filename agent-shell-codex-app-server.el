@@ -247,11 +247,8 @@ APPROVAL-POLICY, SANDBOX-MODE, and CONNECTION-TYPE."
 
 (defun agent-shell-codex-app-server--decode-message (line)
   "Parse LINE as JSON-RPC data."
-  (let ((json-object-type 'alist)
-        (json-array-type 'list)
-        (json-key-type 'symbol)
-        (json-false nil))
-    (json-read-from-string line)))
+  (json-parse-string line :object-type 'alist :array-type 'list
+                     :null-object nil :false-object nil))
 
 (defun agent-shell-codex-app-server--make-error (message &optional data)
   "Build an error object with MESSAGE and optional DATA."
@@ -773,8 +770,8 @@ held up or dropped by the PTY line discipline."
 (defun agent-shell-codex-app-server--consume-echoed-line (client line)
   "Return non-nil when LINE matches the next echoed request for CLIENT."
   (let ((echo-lines (map-elt client :echo-lines)))
-    (when (and (agent-shell-codex-app-server--track-pty-echo-p client)
-               echo-lines
+    (when (and echo-lines
+               (agent-shell-codex-app-server--track-pty-echo-p client)
                (equal (string-trim-right line "\r+")
                       (seq-first echo-lines)))
       (map-put! client :echo-lines (seq-rest echo-lines))
@@ -3099,7 +3096,7 @@ two runs of hook \"preToolUse:0:/x\" become distinct tool calls."
       (let* ((line (substring pending 0 (match-beginning 0)))
              (rest (substring pending (match-end 0))))
         (setq pending rest)
-        (unless (or (string-empty-p (string-trim line))
+        (unless (or (string-blank-p line)
                     (agent-shell-codex-app-server--consume-echoed-line client line))
           (condition-case err
               (agent-shell-codex-app-server--enqueue-message
