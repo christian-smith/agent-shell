@@ -46,22 +46,20 @@ select a different window.  Existing draft cursor positions are preserved."
   :group 'agent-shell-faces)
 
 (defface agent-shell-status-ready
-  '((((class color) (background dark)) :foreground "PaleGreen")
-    (((class color) (background light)) :foreground "green4")
+  '((((class color) (background dark)) :foreground "white" :background "#165b33")
+    (((class color) (background light)) :foreground "white" :background "#006b35")
     (t :inherit mode-line-buffer-id))
   "Agent name when the shell is ready for input."
   :group 'agent-shell-faces)
 
 (defface agent-shell-status-input
-  '((((class color) (background dark)) :foreground "gold")
-    (((class color) (background light)) :foreground "DarkGoldenrod4")
+  '((((class color)) :foreground "#111111" :background "#f1c40f")
     (t :inherit mode-line-buffer-id))
   "Agent name when a question or approval needs an answer."
   :group 'agent-shell-faces)
 
 (defface agent-shell-status-failed
-  '((((class color) (background dark)) :foreground "IndianRed1")
-    (((class color) (background light)) :foreground "red3")
+  '((((class color)) :foreground "white" :background "#8b1a1a")
     (t :inherit mode-line-buffer-id))
   "Agent name after a failed turn, until the next submission."
   :group 'agent-shell-faces)
