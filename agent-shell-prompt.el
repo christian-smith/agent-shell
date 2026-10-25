@@ -42,6 +42,7 @@
 (require 'comint)
 (require 'seq)
 (require 'shell-maker)
+(require 'agent-shell-status-display)
 (eval-when-compile (require 'cl-lib))
 
 (declare-function agent-shell-chat--busy-frame "agent-shell-chat-mode")
@@ -406,12 +407,14 @@ clears the busy flag, records the input ring on SUCCESS, and runs
 buffer (chat mode's labels) still fire.
 
 Keep that branch in step with `shell-maker-finish-output'."
-  (if (not (agent-shell--live-input-prompt-p comint-last-prompt))
-      (shell-maker-finish-output :config config :success success)
-    (setq shell-maker--busy nil)
-    (when success
-      (shell-maker--write-input-ring-history config))
-    (run-hooks 'shell-maker-finish-output-hook)))
+  (let ((followers (agent-shell-status-display--take-completion)))
+    (if (not (agent-shell--live-input-prompt-p comint-last-prompt))
+        (shell-maker-finish-output :config config :success success)
+      (setq shell-maker--busy nil)
+      (when success
+        (shell-maker--write-input-ring-history config))
+      (run-hooks 'shell-maker-finish-output-hook))
+    (agent-shell-status-display--finish-completion followers)))
 
 (provide 'agent-shell-prompt)
 

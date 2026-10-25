@@ -101,6 +101,7 @@
 (require 'agent-shell-qoder)
 (require 'agent-shell-qwen)
 (require 'agent-shell-styles)
+(require 'agent-shell-status-display)
 (require 'agent-shell-usage)
 (require 'agent-shell-worktree)
 (require 'agent-shell-ui)
@@ -1382,6 +1383,9 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
         (cons :stream-render-pending nil)
         (cons :stream-render-timer nil)
         (cons :sleep-token nil)
+        (cons :status-display-failed nil)
+        (cons :status-display-subscription nil)
+        (cons :completion-followers nil)
         (cons :active-requests nil)
         (cons :pending-prompts nil)
         (cons :usage (list (cons :total-tokens 0)
@@ -9496,6 +9500,7 @@ reads the buffer's prompt capabilities."
                :prompt content-blocks)
      :buffer (current-buffer)
      :on-success (lambda (acp-response)
+                   (agent-shell-status-display--prepare-completion)
                    ;; Before the turn-end footer scans the fragment bodies.
                    (agent-shell--flush-stream-render (agent-shell--state))
                    (agent-shell--separate-transcript-after-agent-message
@@ -9577,6 +9582,7 @@ Continue?" (agent-shell--prompt-queue-summary)))
                       (t
                        (agent-shell--prompt-queue-display :skip-summary t)))))
      :on-failure (lambda (acp-error raw-message)
+                   (agent-shell-status-display--prepare-completion t)
                    ;; A failed/interrupted turn may have stopped mid
                    ;; agent_message_chunk, leaving the transcript body
                    ;; without a trailing newline.  Separate it so the
@@ -11483,6 +11489,7 @@ Shows \" ⧉\" when a command prefix is used."
 (defun agent-shell--setup-modeline ()
   "Set up the modeline to display session mode.
 Uses :eval so the mode updates automatically when state changes."
+  (agent-shell-status-display--setup)
   (setq-local mode-line-misc-info
               (append mode-line-misc-info
                       '((:eval (agent-shell--mode-line-format))))))
