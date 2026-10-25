@@ -146,7 +146,7 @@ For OpenAI's Codex, install [[https://github.com/agentclientprotocol/codex-acp][
 
 Alternatively, install the [[https://developers.openai.com/codex/cli/][Codex CLI]] and use its native app-server transport. Set =(setq agent-shell-openai-codex-transport 'app-server)= before starting Codex. The default remains =acp=.
 
-Codex can ask asynchronous questions while continuing its work. These appear in a separate question buffer without taking focus. Select =Answer= to choose suggested answers or enter your own text. Answers steer a running turn or start a new turn when Codex is idle. Dismissing a question does not interrupt Codex.
+Codex can ask asynchronous questions while continuing its work. These appear in a separate question buffer without taking focus. Press =a= or select =Answer= to choose suggested answers or enter your own text. Answers steer a running turn or start a new turn when Codex is idle. Press =q= or select =Dismiss= to dismiss the questions and kill their buffer without interrupting Codex.
 
 To disable command approvals and sandboxing for new or resumed Codex app-server sessions, set =(setq agent-shell-openai-codex-app-server-yolo-mode t)=. This allows commands and file changes outside the workspace without asking. The default is nil; running sessions and other agents are unchanged. MCP forms and user-input questions can still require a response.
 

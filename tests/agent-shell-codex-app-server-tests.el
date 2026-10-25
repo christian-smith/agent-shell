@@ -1093,6 +1093,82 @@ Codex sends `TurnPlanUpdatedNotification' with the steps directly under
       (dolist (buffer displayed)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+(ert-deftest agent-shell-codex-app-server-question-quit-dismisses-only-current-buffer ()
+  "The q command dismisses and kills only its question without sending input."
+  (let ((client (agent-shell-codex-app-server-make-client :command "sh"))
+        (agent-shell-codex-app-server-question-hook nil)
+        displayed)
+    (unwind-protect
+        (cl-letf (((symbol-function 'display-buffer)
+                   (lambda (buffer &rest _) (push buffer displayed)))
+                  ((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+                   (lambda (&rest _) (ert-fail "Dismissal sent a request")))
+                  ((symbol-function 'agent-shell--insert-to-shell-buffer)
+                   (lambda (&rest _) (ert-fail "Dismissal sent input"))))
+          (dolist (id '("first" "second"))
+            (agent-shell-codex-app-server--show-async-questions
+             client `((id . ,id) (questions . (((title . "Which color?")))))))
+          (let ((first (gethash "first" (map-elt client :async-questions)))
+                (second (gethash "second" (map-elt client :async-questions))))
+            (with-current-buffer (map-elt first :buffer)
+              (should (derived-mode-p 'special-mode))
+              (call-interactively (key-binding (kbd "q"))))
+            (should (eq (map-elt first :status) 'dismissed))
+            (should-not (buffer-live-p (map-elt first :buffer)))
+            (should (eq (map-elt second :status) 'pending))
+            (should (buffer-live-p (map-elt second :buffer)))))
+      (dolist (buffer displayed)
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest agent-shell-codex-app-server-question-answer-shortcut-steers-or-retries ()
+  "The a command delivers immediately; cancellation and rejection allow retry."
+  (require 'agent-shell)
+  (dolist (outcome '(accepted cancelled rejected))
+    (with-temp-buffer
+      (let* ((shell (current-buffer))
+             (client (agent-shell-codex-app-server-make-client :command "sh" :context-buffer shell))
+             (agent-shell--state (agent-shell--make-state :buffer shell))
+             (agent-shell-codex-app-server-question-hook nil)
+             question-buffer request)
+        (map-put! agent-shell--state :client client)
+        (map-put! client :thread-id "thread-1")
+        (map-put! client :active-turn-id "turn-1")
+        (map-put! client :pending-prompt '((:turn-id . "turn-1")))
+        (unwind-protect
+            (cl-letf (((symbol-function 'display-buffer)
+                       (lambda (buffer &rest _) (setq question-buffer buffer)))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _)
+                         (if (eq outcome 'cancelled) (signal 'quit nil) "Green")))
+                      ((symbol-function 'shell-maker-busy) (lambda (&rest _) t))
+                      ((symbol-function 'agent-shell--build-content-blocks)
+                       (lambda (text) `(((type . "text") (text . ,text)))))
+                      ((symbol-function 'agent-shell-codex-app-server--send-rpc-request)
+                       (lambda (&rest args) (setq request args)))
+                      ((symbol-function 'agent-shell--prompt-queue-enqueue)
+                       (lambda (&rest _) (ert-fail "Question answer was queued"))))
+              (agent-shell-codex-app-server--show-async-questions
+               client '((id . "question") (questions . (((title . "Which color?"))))))
+              (with-current-buffer question-buffer
+                (condition-case nil
+                    (call-interactively (key-binding (kbd "a")))
+                  (quit (should (eq outcome 'cancelled)))))
+              (let ((context (gethash "question" (map-elt client :async-questions))))
+                (if (eq outcome 'cancelled)
+                    (should-not request)
+                  (should (equal (plist-get request :method) "turn/steer"))
+                  (should (equal (map-elt (seq-first (map-elt (plist-get request :params) 'input)) 'text)
+                                 "Which color?\nGreen"))
+                  (should (eq (map-elt context :status) 'answering))
+                  (should (buffer-live-p question-buffer))
+                  (if (eq outcome 'accepted)
+                      (funcall (plist-get request :on-success) '((turnId . "turn-1")))
+                    (funcall (plist-get request :on-failure) '((message . "Rejected")))))
+                (should (eq (map-elt context :status)
+                            (if (eq outcome 'accepted) 'answered 'pending)))
+                (should (eq (buffer-live-p question-buffer) (not (eq outcome 'accepted))))))
+          (when (buffer-live-p question-buffer) (kill-buffer question-buffer)))))))
+
 (ert-deftest agent-shell-codex-app-server-reconnect-preserves-buffer ()
   "Reconnect releases the old writer before resuming and preserves the buffer."
   (dolist (outcome '(failure success busy))
@@ -1425,6 +1501,7 @@ Codex sends `TurnPlanUpdatedNotification' with the steps directly under
 
 (ert-deftest agent-shell-codex-app-server-async-answer-failure-keeps-question ()
   "Undelivered answers remain available to retry instead of being queued."
+  (require 'agent-shell)
   (dolist (outcome '(rejected stale send-error no-active-turn))
     (with-temp-buffer
       (let* ((shell (current-buffer))

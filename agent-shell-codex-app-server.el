@@ -1347,6 +1347,37 @@ Use MODEL-ID and EFFORT to resolve the current mode."
    (t
     (format "%s" value))))
 
+(defvar-local agent-shell-codex-app-server--question-context nil
+  "Asynchronous question context owned by the current question buffer.")
+
+(defvar agent-shell-codex-app-server-question-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "a") #'agent-shell-codex-app-server-question-answer)
+    (define-key map (kbd "q") #'agent-shell-codex-app-server-question-dismiss)
+    map)
+  "Keymap for asynchronous Codex questions.")
+
+(define-derived-mode agent-shell-codex-app-server-question-mode special-mode "Codex Questions"
+  "Read asynchronous Codex questions; use `a' to answer or `q' to dismiss.")
+
+(defun agent-shell-codex-app-server-question-answer ()
+  "Answer the current question buffer's questions."
+  (interactive)
+  (unless agent-shell-codex-app-server--question-context
+    (user-error "No Codex question in this buffer"))
+  (agent-shell-codex-app-server--answer-async-questions
+   agent-shell-codex-app-server--question-context))
+
+(defun agent-shell-codex-app-server-question-dismiss ()
+  "Dismiss the current questions and kill their buffer without sending input."
+  (interactive)
+  (unless agent-shell-codex-app-server--question-context
+    (user-error "No Codex question in this buffer"))
+  (when (memq (map-elt agent-shell-codex-app-server--question-context :status)
+              '(pending answering))
+    (setf (map-elt agent-shell-codex-app-server--question-context :status) 'dismissed))
+  (kill-buffer (current-buffer)))
+
 (defun agent-shell-codex-app-server--answer-async-questions (context)
   "Collect and submit answers for the question CONTEXT.
 
@@ -1426,7 +1457,8 @@ If Codex rejects a steer, keep the question available for retry."
                           (cons :status 'pending))))
       (puthash id context (map-elt client :async-questions))
       (with-current-buffer buffer
-        (special-mode)
+        (agent-shell-codex-app-server-question-mode)
+        (setq-local agent-shell-codex-app-server--question-context context)
         (let ((inhibit-read-only t))
           (seq-doseq (question questions)
             (insert (map-elt question 'title) "\n")
@@ -1434,15 +1466,14 @@ If Codex rejects a steer, keep the question available for retry."
               (insert "  - " option "\n"))
             (insert "\n"))
           (insert-text-button
-           "Answer" 'follow-link t
+           "Answer (a)" 'follow-link t
            'action (lambda (_button)
-                     (agent-shell-codex-app-server--answer-async-questions context)))
+                     (agent-shell-codex-app-server-question-answer)))
           (insert "  ")
           (insert-text-button
-           "Dismiss" 'follow-link t
+           "Dismiss (q)" 'follow-link t
            'action (lambda (_button)
-                     (setf (map-elt context :status) 'dismissed)
-                     (kill-buffer buffer)))
+                     (agent-shell-codex-app-server-question-dismiss)))
           (goto-char (point-min))))
       (display-buffer buffer)
       (run-hook-with-args 'agent-shell-codex-app-server-question-hook context))))
