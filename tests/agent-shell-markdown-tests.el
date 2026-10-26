@@ -4599,6 +4599,45 @@ exercised by the editing in the -all-math-cases test.)"
         (agent-shell-markdown-replace-markup)
         (should (= (agent-shell-markdown--watermark-start) open-dollar))))))
 
+(ert-deftest agent-shell-markdown-render-functions-protect-pending-markup-test ()
+  "The earliest external frontier protects unfinished markup this pass."
+  (with-temp-buffer
+    (let* ((prefix "intro\n")
+           (pending "$$\n**pending** and \\_literal\\_\nmore\n")
+           (frontier (+ (point-min) (length prefix)))
+           (agent-shell-markdown-render-functions
+            (list (lambda (_context)
+                    (list (cons :watermark (+ frontier 4))))
+                  #'ignore
+                  (lambda (_context)
+                    (list (cons :watermark frontier))))))
+      (insert prefix pending)
+      (agent-shell-markdown-replace-markup :render-images nil)
+      ;; Neither emphasis nor escape decoding may consume pending input.
+      (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                     (concat prefix pending)))
+      (should (= (agent-shell-markdown--watermark-start) frontier))
+      ;; Once the external renderer releases its frontier, revisit the tail.
+      (let ((agent-shell-markdown-render-functions nil))
+        (agent-shell-markdown-replace-markup :render-images nil))
+      (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                     "intro\n$$\npending and _literal_\nmore\n")))))
+
+(ert-deftest agent-shell-markdown-fontification-bookkeeping-is-silent-test ()
+  "Fontification properties do not fire change hooks or dirty the buffer."
+  (dolist (modified '(nil t))
+    (with-temp-buffer
+      (insert (propertize "plain text" 'face 'bold))
+      (set-buffer-modified-p modified)
+      (let* ((changes 0)
+             (after-change-functions
+              (list (lambda (&rest _) (setq changes (1+ changes))))))
+        (agent-shell-markdown-replace-markup :render-images nil)
+        (should (= changes 0))
+        (should (eq (buffer-modified-p) modified))
+        (should (eq (get-text-property (point-min) 'font-lock-face) 'bold))
+        (should (eq (get-text-property (point-min) 'fontified) t))))))
+
 (ert-deftest agent-shell-markdown-render-functions-all-math-cases ()
   ;; A renderer that claims every math form the PR supports and wraps its
   ;; LaTeX in brackets: inline \(..\) as [..], and block \[..\], $$..$$ and
