@@ -456,6 +456,13 @@ block is left as literal text."
         (when agent-shell-markdown-render-functions
           (setq external-results (agent-shell-markdown--run-render-functions
                                   context)))
+        ;; An external renderer's unfinished construct must stay literal
+        ;; during this pass, not merely hold back the next pass's watermark.
+        (when-let* ((external-watermarks
+                    (seq-keep (lambda (result) (map-elt result :watermark))
+                              external-results))
+                    (external-watermark (seq-min external-watermarks)))
+          (narrow-to-region (point-min) external-watermark))
         (setq rendered-ranges (agent-shell-markdown--make-markers
                                (agent-shell-markdown--frozen-ranges)))
         (setq avoid-ranges (agent-shell-markdown-sort-ranges
@@ -525,16 +532,17 @@ block is left as literal text."
         ;; styling survives `font-lock-mode' re-fontification — comint
         ;; / shell-maker / agent-shell buffers fontify on every output
         ;; chunk and would otherwise clear our `face' properties.
-        (agent-shell-markdown--mirror-face-to-font-lock-face
-         (point-min) (point-max))
-        ;; Mark rendered chars `fontified' so jit-lock never re-runs over
-        ;; them during a mouse drag.  We style via `face'/`font-lock-face'
-        ;; text properties, not font-lock keywords (`font-lock-defaults'
-        ;; is `(nil t)'), so an in-drag jit-lock pass applies nothing —
-        ;; but firing at all disturbs drag tracking and collapses the
-        ;; selection to empty, silently breaking mouse copy of rendered
-        ;; text (keyboard selection is unaffected).
-        (put-text-property (point-min) (point-max) 'fontified t))
+        (with-silent-modifications
+          (agent-shell-markdown--mirror-face-to-font-lock-face
+           (point-min) (point-max))
+          ;; Mark rendered chars `fontified' so jit-lock never re-runs over
+          ;; them during a mouse drag.  We style via `face'/`font-lock-face'
+          ;; text properties, not font-lock keywords (`font-lock-defaults'
+          ;; is `(nil t)'), so an in-drag jit-lock pass applies nothing —
+          ;; but firing at all disturbs drag tracking and collapses the
+          ;; selection to empty, silently breaking mouse copy of rendered
+          ;; text (keyboard selection is unaffected).
+          (put-text-property (point-min) (point-max) 'fontified t)))
       ;; Normalize list spacing before framing: join items the source
       ;; separated with blank lines so a list always renders as one tidy
       ;; group.  Widened, like the framing below, so it sees the whole
