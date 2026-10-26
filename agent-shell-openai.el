@@ -37,6 +37,7 @@
 (declare-function agent-shell--make-acp-client "agent-shell")
 (declare-function agent-shell-codex-app-server-make-client "agent-shell-codex-app-server")
 (declare-function agent-shell-codex-app-server-handle-busy-prompt "agent-shell-codex-app-server")
+(autoload 'agent-shell-codex-app-server-set-session-name "agent-shell-codex-app-server")
 (declare-function agent-shell-make-agent-config "agent-shell")
 (autoload 'agent-shell-make-agent-config "agent-shell")
 (autoload 'agent-shell-codex-app-server-make-client "agent-shell-codex-app-server")
@@ -304,6 +305,8 @@ Returns an agent configuration alist using `agent-shell-make-agent-config'."
    :default-config-options (lambda () agent-shell-openai-default-config-options)
    :busy-prompt-handler (when (eq agent-shell-openai-codex-transport 'app-server)
                           #'agent-shell-codex-app-server-handle-busy-prompt)
+   :session-name-handler (when (eq agent-shell-openai-codex-transport 'app-server)
+                           #'agent-shell-codex-app-server-set-session-name)
    :client-maker (lambda (buffer)
                    (agent-shell-openai-make-codex-client :buffer buffer))
    :notification-adapter #'agent-shell-openai--notification-adapter

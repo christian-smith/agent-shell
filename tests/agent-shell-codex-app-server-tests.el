@@ -648,7 +648,8 @@ Use STATUS and ENTRIES when supplied, otherwise send routine activity."
           (map-put! client :thread-id "thread-1")
           (with-current-buffer target-buffer
             (setq-local agent-shell--state
-                        `((:session . ((:id . "thread-1")
+                        `((:client . ,client)
+                          (:session . ((:id . "thread-1")
                                        (:title . nil))))))
           (agent-shell-codex-app-server--handle-notification
            client

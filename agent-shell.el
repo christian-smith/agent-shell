@@ -102,6 +102,7 @@
 (require 'agent-shell-qwen)
 (require 'agent-shell-styles)
 (require 'agent-shell-status-display)
+(require 'agent-shell-session-name)
 (require 'agent-shell-usage)
 (require 'agent-shell-worktree)
 (require 'agent-shell-ui)
@@ -802,6 +803,7 @@ Each element can be:
                                               request-handler
                                               prompt-response-adapter
                                               busy-prompt-handler
+                                              session-name-handler
                                               icon-name
                                               install-instructions)
   "Create an agent configuration alist.
@@ -851,6 +853,10 @@ Keyword arguments:
   after `session/prompt'.  Return an ACP `usage' alist or nil.
 - BUSY-PROMPT-HANDLER: Optional function called when input is submitted
   during an active prompt.  Return non-nil when the input was handled.
+- SESSION-NAME-HANDLER: Optional function receiving an alist with :state,
+  :session-id, :name, :on-success and :on-failure.  Persist the name without
+  resuming or prompting the agent, then call :on-success with no arguments
+  or :on-failure with an error string.
 - ICON-NAME: Name of the icon to use
 - INSTALL-INSTRUCTIONS: Instructions to show when executable is not found
 
@@ -876,6 +882,7 @@ Returns an alist with all specified values."
     (:request-handler . ,request-handler)                      ;; function
     (:prompt-response-adapter . ,prompt-response-adapter)      ;; function
     (:busy-prompt-handler . ,busy-prompt-handler)              ;; function
+    (:session-name-handler . ,session-name-handler)            ;; function
     (:icon-name . ,icon-name)
     (:install-instructions . ,install-instructions)))
 
@@ -1123,6 +1130,7 @@ where LABEL is the displayed string and TOKEN identifies the choice:
   `:downloads-shell': Start a new shell in ~/Downloads.
   `:temp-shell': Start a new shell in a temporary directory.
   `:other-shell': Switch to an existing shell buffer.
+  `:rename-session': Rename a saved session without resuming it (if supported).
 
 Resumable session candidates use their session alist as TOKEN.
 
@@ -1337,6 +1345,7 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
   (list (cons :agent-config agent-config)
         (cons :buffer buffer)
         (cons :client nil)
+        (cons :session-name-update nil)
         (cons :client-maker client-maker)
         (cons :outgoing-request-decorator outgoing-request-decorator)
         (cons :heartbeat heartbeat)
@@ -8123,7 +8132,8 @@ MAX-WIDTHS is an alist mapping column symbols to their max widths."
 
 Return selected session alist, nil to start a new session, or
 `:other-shell' when the user chose an existing shell (already
-displayed and bootstrapping shell killed).
+displayed and bootstrapping shell killed), or `:rename-session' to name
+a saved session before choosing again.
 Falls back to latest session in batch mode (e.g. tests)."
   (when (or acp-sessions (agent-shell-buffers))
     (if noninteractive
@@ -8146,6 +8156,8 @@ Falls back to latest session in batch mode (e.g. tests)."
                                              (cons "New temp shell" :temp-shell))
                                        (when other-shells
                                          (list (cons "Switch to shell buffer" :other-shell)))
+                                       (when (and acp-sessions (agent-shell-session-name--handler))
+                                         (list (cons "Rename saved session..." :rename-session)))
                                        (mapcar (lambda (acp-session)
                                                  (cons (agent-shell--session-choice-label
                                                         :acp-session acp-session
@@ -8834,7 +8846,13 @@ message when a request fails or the agent repeats a cursor."
                                  (_ (message "Unknown session strategy '%s', starting a new session"
                                              agent-shell-session-strategy)
                                     nil))))
-                         (unless (eq acp-session :other-shell)
+                         (when (eq acp-session :rename-session)
+                           (agent-shell-session-name--rename-saved
+                            acp-sessions
+                            (lambda ()
+                              (agent-shell--initiate-session-list-and-load
+                               :shell-buffer shell-buffer :on-session-init on-session-init))))
+                         (unless (memq acp-session '(:other-shell :rename-session))
                            (let ((acp-session-id (and acp-session
                                                       (map-elt acp-session 'sessionId))))
                              (agent-shell--emit-event

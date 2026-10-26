@@ -28,6 +28,7 @@
 (eval-when-compile
   (require 'cl-lib))
 (require 'acp)
+(require 'agent-shell-session-name)
 (require 'button)
 (require 'json)
 (require 'map)
@@ -164,14 +165,48 @@ existing alist key but cannot add a missing key in place."
                   (_ (buffer-live-p buffer)))
         (with-current-buffer buffer
           (when (and (boundp 'agent-shell--state)
+                     (eq (map-elt agent-shell--state :client) client)
                      (map-elt agent-shell--state :session))
             (agent-shell-codex-app-server--ensure-session-title-slot client)
-            (map-put! (map-elt agent-shell--state :session)
-                      :title
-                      (map-elt params 'threadName))
-            (when (and (derived-mode-p 'agent-shell-mode)
-                       (fboundp 'agent-shell--update-header-and-mode-line))
-              (funcall 'agent-shell--update-header-and-mode-line))))))))
+            (if (derived-mode-p 'agent-shell-mode)
+                (agent-shell-session-name--apply thread-id (map-elt params 'threadName) t)
+              (map-put! (map-elt agent-shell--state :session)
+                        :title (map-elt params 'threadName)))))))))
+
+(defun agent-shell-codex-app-server--restore-session-name (client result)
+  "Restore CLIENT's persisted name from a successful thread RESULT."
+  (when-let* (((map-contains-key (map-elt result 'thread) 'name))
+              (buffer (map-elt client :context-buffer))
+              ((buffer-live-p buffer))
+              ((with-current-buffer buffer
+                 (and (boundp 'agent-shell--state)
+                      (eq (map-elt agent-shell--state :client) client)))))
+    (agent-shell-codex-app-server--update-session-title
+     client `((threadId . ,(map-nested-elt result '(thread id)))
+              (threadName . ,(map-nested-elt result '(thread name)))))))
+
+;;;###autoload
+(defun agent-shell-codex-app-server-set-session-name (event)
+  "Persist the session name requested by naming EVENT without starting a turn.
+EVENT contains :state, :session-id, :name, :on-success and :on-failure."
+  (let* ((state (map-elt event :state))
+         (client (map-elt state :client))
+         (buffer (map-elt state :buffer)))
+    (unless (and (agent-shell-codex-app-server-client-p client)
+                 (agent-shell-codex-app-server--client-started-p client)
+                 (buffer-live-p buffer)
+                 (eq (buffer-local-value 'agent-shell--state buffer) state)
+                 (not (map-elt client :shutting-down))
+                 (not (map-elt client :reconnecting)))
+      (user-error "Use a connected Codex app-server shell; wait for reconnect to finish"))
+    (agent-shell-codex-app-server--send-rpc-request
+     :client client :buffer buffer :method "thread/name/set"
+     :params `((threadId . ,(map-elt event :session-id))
+               (name . ,(map-elt event :name)))
+     :on-success (lambda (_result) (funcall (map-elt event :on-success)))
+     :on-failure (lambda (reason &rest _)
+                   (funcall (map-elt event :on-failure)
+                            (agent-shell-codex-app-server--error-message-text reason))))))
 
 ;;;###autoload
 (cl-defun agent-shell-codex-app-server-make-client (&key command
@@ -3431,7 +3466,8 @@ pages are loaded."
                                     (agent-shell-codex-app-server--session-response
                                      client result))
                            (agent-shell-codex-app-server--ensure-session-title-slot
-                            client)))
+                            client)
+                           (agent-shell-codex-app-server--restore-session-name client result)))
            :on-failure on-failure))
         on-failure))
       ("session/list"
@@ -3467,7 +3503,8 @@ pages are loaded."
                                     (agent-shell-codex-app-server--session-response
                                      client result))
                            (agent-shell-codex-app-server--ensure-session-title-slot
-                            client)))
+                            client)
+                           (agent-shell-codex-app-server--restore-session-name client result)))
            :on-failure on-failure))
         on-failure))
       ("session/fork"
@@ -3490,7 +3527,8 @@ pages are loaded."
                                     (agent-shell-codex-app-server--session-response
                                      client result))
                            (agent-shell-codex-app-server--ensure-session-title-slot
-                            client)))
+                            client)
+                           (agent-shell-codex-app-server--restore-session-name client result)))
            :on-failure on-failure))
         on-failure))
       ("session/set_model"
@@ -3965,6 +4003,7 @@ Background terminals and browser connections may not survive reconnecting."
                          (cancel-timer timer)
                          (map-put! replacement :reconnecting nil)
                          (map-put! old :reconnecting nil)
+                         (agent-shell-codex-app-server--restore-session-name replacement result)
                          (message "Codex reconnected using current credentials; conversation preserved")))))))))
       (condition-case err
           (agent-shell-codex-app-server-send-request
