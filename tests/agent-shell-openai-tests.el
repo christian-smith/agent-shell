@@ -146,8 +146,8 @@
              `((method . "session/update")
                (params (update (sessionUpdate . "tool_call_update") ,@update)))))
           (should (equal (map-elt fragments "one")
-                         "```console\nprintf one\n```\n\nfirst\nsecond"))
-          (should (equal (map-elt fragments "two") "other"))
+                         "```console\nprintf one\n```\n\n```\nfirst\nsecond\n```"))
+          (should (equal (map-elt fragments "two") "```\nother\n```"))
           (should (string-search "first\nsecond" (seq-elt transcripts 1)))
           (should (string-search "other" (seq-first transcripts)))
           ;; A later metadata-only update must not erase the completed output.
@@ -157,7 +157,7 @@
            '((method . "session/update")
              (params (update (sessionUpdate . "tool_call_update")
                              (toolCallId . "one") (title . "Renamed command")))))
-          (should (string-suffix-p "first\nsecond" (map-elt fragments "one"))))))))
+          (should (string-suffix-p "first\nsecond\n```" (map-elt fragments "one"))))))))
 
 (ert-deftest agent-shell-openai-tool-output-completed-delta-test ()
   "Display output delivered only with a command's completion."
@@ -183,26 +183,27 @@
                            (_meta (terminal_output_delta (terminal_id . "one")
                                                          (data . "visible output\n"))
                                   (terminal_exit (terminal_id . "one") (exit_code . 0)))))))
-        (should (equal chat "visible output"))
+        (should (equal chat "```\nvisible output\n```"))
         (should (string-search "visible output" transcript))))))
 
 (ert-deftest agent-shell-openai-output-snapshots-replace-deltas-test ()
   "Complete snapshots replace deltas and survive subsequent updates."
   (with-temp-buffer
     (agent-shell-openai-tests--initialize-state)
-    (dolist (case '((((_meta (terminal_output_delta (data . "again\n")))) . "again\n")
-                    (((_meta (terminal_output_delta (data . "again\n")))) . "again\nagain\n")
+    (dolist (case '((((_meta (terminal_output_delta (data . "again\n")))) . "```\nagain\n```")
+                    (((_meta (terminal_output_delta (data . "again\n"))))
+                     . "```\nagain\nagain\n```")
                     (((rawOutput (formatted_output . "complete\n"))
                       (_meta (terminal_output_delta (data . "ignored")))) . "complete\n")
-                    (nil . "complete\n")
+                    (nil . "```\ncomplete\n```")
                     (((content . [((type . "content")
                                    (content (type . "text") (text . "snapshot")))])
                       (rawOutput (formatted_output . "ignored"))
                       (_meta (terminal_output_delta (data . "ignored")))) . "snapshot")
-                    (((_meta (terminal_output_delta (data . 42)))) . "snapshot")
+                    (((_meta (terminal_output_delta (data . 42)))) . "```\nsnapshot\n```")
                     (((rawOutput (formatted_output . ""))) . "")
                     (nil . "")
-                    (((_meta (terminal_output_delta (data . "fresh")))) . "fresh")))
+                    (((_meta (terminal_output_delta (data . "fresh")))) . "```\nfresh\n```")))
       (should (equal
                (agent-shell--tool-call-update-output-markdown
                 (agent-shell-openai-tests--adapt-update (car case)))
@@ -224,7 +225,7 @@
                     `((content . [,diff])
                       (_meta (terminal_output_delta (data . "output")))))))
       (should (equal (seq-first (map-elt update 'content)) diff))
-      (should (equal (agent-shell--tool-call-update-output-markdown update) "output")))))
+      (should (equal (agent-shell--tool-call-update-output-markdown update) "```\noutput\n```")))))
 
 (ert-deftest agent-shell-openai-output-buffer-isolation-test ()
   "Identical tool-call IDs in separate shells do not share output."
@@ -238,14 +239,14 @@
                (agent-shell--tool-call-update-output-markdown
                 (agent-shell-openai-tests--adapt-update
                  '((_meta (terminal_output_delta (data . "inner"))))))
-               "inner")))
+               "```\ninner\n```")))
     (should (equal
              (agent-shell--tool-call-update-output-markdown
               (agent-shell-openai-tests--adapt-update nil))
-             "outer"))))
+             "```\nouter\n```"))))
 
 (ert-deftest agent-shell-openai-output-unrelated-notifications-test ()
-  "Leave other notifications and malformed deltas unchanged."
+  "Leave other notifications, malformed deltas and non-streamed calls unchanged."
   (with-temp-buffer
     (agent-shell-openai-tests--initialize-state)
     (dolist (notification
@@ -260,7 +261,12 @@
                ((method . "session/update")
                 (params (update (sessionUpdate . "tool_call_update")
                                 (toolCallId . "one")
-                                (_meta (terminal_output_delta (data . 42))))))))
+                                (_meta (terminal_output_delta (data . 42))))))
+               ((method . "session/update")
+                (params (update (sessionUpdate . "tool_call_update")
+                                (toolCallId . "read") (status . "completed")
+                                (content . [((type . "content")
+                                             (content (type . "text") (text . "file")))]))))))
       (should (equal (agent-shell-openai--notification-adapter
                       :acp-notification (copy-tree notification t))
                      notification)))
@@ -280,7 +286,8 @@
           (agent-shell--emit-event :event event :data '((:stop-reason . "cancelled")))
           (should-not agent-shell-openai--terminal-output-snapshots)
           (should-not (map-elt agent-shell--state :event-subscriptions))
-          (should (equal (agent-shell--tool-call-update-output-markdown update) "retained"))
+          (should (equal (agent-shell--tool-call-update-output-markdown update)
+                         "```\nretained\n```"))
           (should (equal (agent-shell--tool-call-update-output-markdown
                           (agent-shell-openai-tests--adapt-update nil)) "")))))))
 

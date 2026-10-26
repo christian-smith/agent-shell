@@ -191,12 +191,13 @@ authenticate request shape (see its \"DEFAULT_AUTH_REQUEST\")."
 
 Accumulate `_meta.terminal_output_delta.data' by tool-call ID in the
 current buffer.  For example, deltas \"hello\\n\" and \"world\\n\" become a
-text content block containing \"hello\\nworld\\n\".
+text content block containing \"```\\nhello\\nworld\\n```\".
 
-Complete content or `rawOutput.formatted_output' snapshots replace the
-accumulated output.  Status-only updates reuse it, including completion
-after `terminal_exit'.  Keep snapshots until the turn or session ends so
-later metadata-only updates cannot erase the output.
+Only tool calls that stream deltas are tracked.  Once tracked, complete
+content or `rawOutput.formatted_output' snapshots replace the accumulated
+output.  Status-only updates reuse it, including completion after
+`terminal_exit'.  Keep snapshots until the turn or session ends so later
+metadata-only updates cannot erase the output.
 
 Return ACP-NOTIFICATION after adaptation."
   (when-let* (((equal (map-elt acp-notification 'method) "session/update"))
@@ -204,6 +205,8 @@ Return ACP-NOTIFICATION after adaptation."
               ((equal (map-elt update 'sessionUpdate) "tool_call_update"))
               (tool-call-id (map-elt update 'toolCallId))
               ((stringp tool-call-id))
+              ((or (stringp (map-nested-elt update '(_meta terminal_output_delta data)))
+                   (map-elt agent-shell-openai--terminal-output-snapshots tool-call-id)))
               (snapshot (agent-shell--tool-call-update-output-markdown update))
               (output (cond
                        ((or (not (string-empty-p snapshot))
@@ -216,11 +219,14 @@ Return ACP-NOTIFICATION after adaptation."
     (unless agent-shell-openai--terminal-output-snapshots
       (agent-shell-openai--subscribe-output-cleanup))
     (setf (map-elt agent-shell-openai--terminal-output-snapshots tool-call-id) output)
-    (unless (equal output snapshot)
+    (when-let* (((not (equal output snapshot)))
+                (text (string-trim-right output "\n+"))
+                ((not (string-empty-p text))))
       (setf (alist-get 'content (alist-get 'update (alist-get 'params acp-notification)))
             (append (map-elt update 'content)
                     (list `((type . "content")
-                            (content (type . "text") (text . ,output))))))))
+                            (content (type . "text")
+                                     (text . ,(format "```\n%s\n```" text)))))))))
   acp-notification)
 
 (defun agent-shell-openai-make-codex-config ()
