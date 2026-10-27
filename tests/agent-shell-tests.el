@@ -5356,6 +5356,57 @@ Scaling an exact cent overshoots it, for example (* 0.07 100) is
                          (agent-shell--svg-fill-color 'agent-shell-secondary))
                  svg-data))))))
 
+(ert-deftest agent-shell--make-header-graphical-ignores-image-scaling-factor-test ()
+  "Test graphical header image is not scaled by `image-scaling-factor'.
+
+The header SVG is already sized in pixels, so automatic scaling on
+displays with wide default fonts would make it overflow the header line."
+  (skip-unless (image-type-available-p 'svg))
+  (with-temp-buffer
+    (setq-local agent-shell--state
+                `((:agent-config . ((:buffer-name . "Test")
+                                    (:icon-name . nil)))
+                  (:session . ((:id . "abc")
+                               (:model-id . nil)
+                               (:models . nil)
+                               (:mode-id . nil)
+                               (:modes . nil)))))
+    (cl-letf (((symbol-function 'agent-shell--state)
+               (lambda () agent-shell--state))
+              ((symbol-function 'agent-shell--context-usage-indicator)
+               (lambda () nil))
+              ((symbol-function 'agent-shell--busy-indicator-frame)
+               (lambda () nil))
+              ((symbol-function 'agent-shell--session-id-indicator)
+               (lambda () nil)))
+      (let* ((agent-shell-header-style 'graphical)
+             (agent-shell--header-cache nil)
+             (image-scaling-factor 2.0)
+             (header (agent-shell--make-header agent-shell--state))
+             (image (get-text-property 1 'display header)))
+        (should (eq (car-safe image) 'image))
+        (should (equal (image-property image :scale) 1))))))
+
+(ert-deftest agent-shell--config-icon-ignores-image-scaling-factor-test ()
+  "Test `agent-shell--config-icon' is not scaled by `image-scaling-factor'.
+
+The icon is sized to `frame-char-height', which is already in pixels, so
+automatic scaling on displays with wide default fonts would make it
+taller than a line."
+  (skip-unless (image-type-available-p 'svg))
+  (let ((icon-file (make-temp-file "agent-shell-icon" nil ".svg"
+                                   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell--make-agent-fallback-icon)
+                   (lambda (_name _width) icon-file)))
+          (let* ((image-scaling-factor 2.0)
+                 (icon (agent-shell--config-icon
+                        :config '((:buffer-name . "Test"))))
+                 (image (get-text-property 0 'display icon)))
+            (should (eq (car-safe image) 'image))
+            (should (equal (image-property image :scale) 1))))
+      (delete-file icon-file))))
+
 ;;; Tests for agent-shell--permission-title
 
 (ert-deftest agent-shell--permission-title-read-shows-filename-test ()
