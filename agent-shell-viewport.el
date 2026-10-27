@@ -33,6 +33,7 @@
 (require 'subr-x)
 (require 'window)
 (require 'flymake)
+(require 'agent-shell-block-motion)
 (require 'agent-shell-dnd)
 (require 'agent-shell-list-edit)
 (require 'agent-shell-markdown)
@@ -59,6 +60,8 @@
 (declare-function agent-shell-interaction-at-point "agent-shell")
 (declare-function agent-shell-copy-session-id "agent-shell")
 (declare-function agent-shell-cycle-session-mode "agent-shell")
+(declare-function agent-shell-elicitation-next-field "agent-shell-elicitation")
+(declare-function agent-shell-elicitation-previous-field "agent-shell-elicitation")
 (declare-function agent-shell-interrupt "agent-shell")
 (declare-function agent-shell-interrupt-confirmed-p "agent-shell")
 (declare-function agent-shell-open-transcript "agent-shell")
@@ -70,6 +73,7 @@
 (declare-function agent-shell-prompt-queue-resume "agent-shell-prompt-queue")
 (declare-function agent-shell-view-acp-logs "agent-shell")
 (declare-function agent-shell-view-traffic "agent-shell")
+(declare-function agent-shell-save-traffic "agent-shell")
 (declare-function agent-shell-next-permission-button "agent-shell")
 (declare-function agent-shell-other-buffer "agent-shell")
 (declare-function agent-shell-previous-permission-button "agent-shell")
@@ -80,7 +84,7 @@
 (declare-function agent-shell-ui-forward-block "agent-shell")
 (declare-function agent-shell-ui-mode "agent-shell")
 (declare-function agent-shell--render-markdown "agent-shell")
-(declare-function agent-shell-completion-mode "agent-shell-completion")
+(declare-function agent-shell-completion--setup "agent-shell-completion")
 (declare-function agent-shell-yank-dwim "agent-shell")
 
 (defvar-local agent-shell-viewport--clean-up t)
@@ -91,7 +95,6 @@
 (defvar agent-shell-preferred-agent-config)
 (defvar agent-shell-session-strategy)
 (defvar agent-shell--state)
-(defvar agent-shell-file-completion-enabled)
 
 (defvar-local agent-shell-viewport--compose-snapshot nil
   "Alist with :content and :location from compose buffer before viewing history.")
@@ -667,6 +670,8 @@ in, landing on the item after it rather than on its next cell."
                       (agent-shell-ui-forward-block)))
          (button-pos (save-mark-and-excursion
                        (agent-shell-next-permission-button)))
+         (field-pos (save-mark-and-excursion
+                      (agent-shell-elicitation-next-field)))
          (image-pos (save-mark-and-excursion
                       (agent-shell-markdown--next-visible-image)))
          (link-pos (save-mark-and-excursion
@@ -686,6 +691,7 @@ in, landing on the item after it rather than on its next cell."
                                                           response-start
                                                           block-pos
                                                           button-pos
+                                                          field-pos
                                                           image-pos
                                                           link-pos
                                                           source-block-pos
@@ -733,6 +739,8 @@ in, as `agent-shell-viewport-next-item' does from its end."
                       (agent-shell-ui-backward-block)))
          (button-pos (save-mark-and-excursion
                        (agent-shell-previous-permission-button)))
+         (field-pos (save-mark-and-excursion
+                      (agent-shell-elicitation-previous-field)))
          (image-pos (save-mark-and-excursion
                       (agent-shell-markdown--previous-visible-image)))
          (link-pos (save-mark-and-excursion
@@ -754,6 +762,7 @@ in, as `agent-shell-viewport-next-item' does from its end."
                                                           response-start
                                                           block-pos
                                                           button-pos
+                                                          field-pos
                                                           image-pos
                                                           link-pos
                                                           source-block-pos
@@ -1172,6 +1181,17 @@ buffer from the snapshot and switch to edit mode."
     (with-current-buffer shell-buffer
       (agent-shell-view-traffic))))
 
+(defun agent-shell-viewport-save-traffic ()
+  "Save agent shell traffic to a .traffic file and reveal it in `dired'."
+  (declare (modes agent-shell-viewport-view-mode
+                  agent-shell-viewport-edit-mode))
+  (interactive)
+  (agent-shell-viewport--ensure-buffer)
+  (let ((shell-buffer (or (agent-shell--current-shell)
+                          (user-error "Not in an agent-shell buffer"))))
+    (with-current-buffer shell-buffer
+      (agent-shell-save-traffic))))
+
 (defun agent-shell-viewport-view-acp-logs ()
   "View agent shell ACP logs buffer."
   (declare (modes agent-shell-viewport-view-mode
@@ -1412,6 +1432,8 @@ VIEWPORT-BUFFER is the viewport buffer to check."
                       agent-shell-viewport-view-mode-map
                       '(((:function . agent-shell-viewport-view-traffic)
                          (:description . "View traffic"))
+                        ((:function . agent-shell-viewport-save-traffic)
+                         (:description . "Save traffic"))
                         ((:function . agent-shell-viewport-view-acp-logs)
                          (:description . "View logs"))
                         ((:function . agent-shell-viewport-copy-session-id)
@@ -1650,13 +1672,16 @@ For example, offer to kill associated shell session."
   ;; major-mode change, so view mode keeps its own text-property prefixes.
   (setq-local line-prefix "  ")
   (setq-local wrap-prefix "  ")
-  (when agent-shell-file-completion-enabled
-    (agent-shell-completion-mode +1))
+  (agent-shell-completion--setup)
   (agent-shell-list-edit-mode +1)
   (agent-shell--enable-dnd)
+  (yank-media-handler "image/.*" #'agent-shell--yank-media-image)
   (agent-shell-viewport--update-header)
   (let ((inhibit-read-only t))
     (erase-buffer))
+  ;; A major-mode change keeps `buffer-undo-list', so without this undo
+  ;; in compose brings back the pages view mode erased and inserted.
+  (setq buffer-undo-list nil)
   (add-hook 'kill-buffer-hook #'agent-shell-viewport--clean-up nil t))
 
 (define-derived-mode agent-shell-viewport-view-mode text-mode "Agent Shell Viewport (View)"
@@ -1668,8 +1693,11 @@ For example, offer to kill associated shell session."
   (add-hook 'agent-shell-ui-post-expand-fragment-at-point-hook
             #'agent-shell--render-markdown nil t)
   (agent-shell--enable-dnd)
+  (yank-media-handler "image/.*" #'agent-shell--yank-media-image)
   (agent-shell-viewport--update-header)
   (setq-local filter-buffer-substring-function #'agent-shell--filter-buffer-substring)
+  (setq-local beginning-of-defun-function #'agent-shell--beginning-of-block)
+  (setq-local end-of-defun-function #'agent-shell--end-of-block)
   (setq buffer-read-only t)
   (add-hook 'kill-buffer-hook #'agent-shell-viewport--clean-up nil t))
 

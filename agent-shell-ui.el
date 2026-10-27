@@ -76,20 +76,22 @@ For example, to fold with TAB as well as RET:
 Rebind with `define-key' rather than `setq': already rendered text
 holds on to this keymap object.")
 
-(defun agent-shell-ui--echo-action-hint (verb)
+(defun agent-shell-ui--echo-action-hint (verb &optional command keymap)
   "Echo how to run an action described by VERB.
 
-Searches `agent-shell-ui-fragment-map' for whichever key runs
-`agent-shell-ui-toggle-fragment', skipping mouse bindings so the hint
-names something the user can press.
+Searches KEYMAP for whichever key runs COMMAND, skipping mouse bindings
+so the hint names something the user can press.  COMMAND defaults to
+`agent-shell-ui-toggle-fragment' and KEYMAP to
+`agent-shell-ui-fragment-map', which is the fold chrome; other chrome
+bound to its own shared map passes both.
 
 For example, VERB \"toggle\" echoes \"Press RET to toggle\" with the
 default bindings, or \"Press TAB to toggle\" once that map binds TAB."
   (when-let* ((keys (seq-remove
                      (lambda (key) (mouse-event-p (aref key 0)))
                      (where-is-internal
-                      #'agent-shell-ui-toggle-fragment
-                      (list agent-shell-ui-fragment-map)))))
+                      (or command #'agent-shell-ui-toggle-fragment)
+                      (list (or keymap agent-shell-ui-fragment-map))))))
     (message "Press %s to %s" (key-description (seq-first keys)) verb)))
 
 (defun agent-shell-ui--fragment-help-echo (qualified-id)
@@ -98,6 +100,17 @@ Returns QUALIFIED-ID only when `agent-shell-ui-debug-enabled' is set,
 otherwise nil so the id stays hidden from users."
   (when agent-shell-ui-debug-enabled
     qualified-id))
+
+(defun agent-shell-ui--fragment-help-echo-properties (qualified-id)
+  "Return `help-echo' properties tagging QUALIFIED-ID, or nil to add none.
+
+Applied across a region, a nil `help-echo' does not merely fail to tag
+it: `add-text-properties' sets the property to nil, erasing whatever
+help the region's own content carried.  A body holds arbitrary rendered
+content, which may carry help of its own, so adding no property at all
+is what leaves it in place."
+  (when-let* ((help (agent-shell-ui--fragment-help-echo qualified-id)))
+    (list 'help-echo help)))
 
 (cl-defun agent-shell-ui-make-fragment-model (&key (namespace-id "global") (block-id "1") label-left label-right body group-id group-label (group-expanded t))
   "Create a fragment model alist.
@@ -189,7 +202,7 @@ O(accumulated-body).  Label-only updates leave the body untouched."
                  ;; it still describes the buffer.
                  (cached (unless create-new
                            (agent-shell-ui--cached-block qualified-id)))
-                 (match (unless cached
+                 (match (unless (or cached create-new)
                           (save-mark-and-excursion
                             (goto-char (point-max))
                             (text-property-search-backward
@@ -438,10 +451,10 @@ match.  Explicit `invisible' assignment overrides any value the
 new chars might have inherited via rear-stickiness from preceding
 trailing-whitespace chars."
   (add-text-properties start end
-                       `(agent-shell-ui-section body
-                                                help-echo ,(agent-shell-ui--fragment-help-echo qualified-id)
-                                                read-only t
-                                                front-sticky (read-only)))
+                       (append (list 'agent-shell-ui-section 'body
+                                     'read-only t
+                                     'front-sticky '(read-only))
+                               (agent-shell-ui--fragment-help-echo-properties qualified-id)))
   (when state
     (put-text-property start end 'agent-shell-ui-state state))
   (put-text-property start end 'invisible (if body-invisible t nil)))
@@ -636,10 +649,10 @@ be handed in."
                    :hint "toggle"))
           (let ((insert-end (point)))
             (add-text-properties insert-start insert-end
-                                 `(agent-shell-ui-section ,section
-                                                          help-echo ,(agent-shell-ui--fragment-help-echo qualified-id)
-                                                          read-only t
-                                                          front-sticky (read-only)))
+                                 (append (list 'agent-shell-ui-section section
+                                               'read-only t
+                                               'front-sticky '(read-only))
+                                         (agent-shell-ui--fragment-help-echo-properties qualified-id)))
             (when state
               (put-text-property insert-start insert-end
                                  'agent-shell-ui-state state))))))))
@@ -1010,7 +1023,13 @@ Leaf: hide/show its body per `:collapsed'.  Group: recurse into children."
                          :from (map-elt block :start) :to (map-elt block :end)))
                   (invisible-start (agent-shell-ui--labels-end block)))
         (put-text-property invisible-start (map-elt body :end)
-                           'invisible (and (map-elt state :collapsed) t))))))
+                           'invisible (and (map-elt state :collapsed) t))
+        ;; Keep trailing newlines hidden on expand, as
+        ;; `agent-shell-ui--toggle-leaf-fragment-at-point' does, so the
+        ;; next child still gets its own separator.
+        (unless (map-elt state :collapsed)
+          (agent-shell-ui--apply-trailing-whitespace-invisible
+           (map-elt body :start) (map-elt body :end)))))))
 
 (defun agent-shell-ui--set-group-collapsed (group-qualified-id collapsed)
   "Fold or unfold group GROUP-QUALIFIED-ID (recompute-on-toggle).
@@ -1106,10 +1125,10 @@ indents a child's header line under its group header."
                :hint "toggle"))
       (setq label-left-end (point))
       (add-text-properties label-left-start label-left-end
-                           `(agent-shell-ui-section label-left
-                                                    help-echo ,(agent-shell-ui--fragment-help-echo qualified-id)
-                                                    read-only t
-                                                    front-sticky (read-only)))
+                           (append (list 'agent-shell-ui-section 'label-left
+                                         'read-only t
+                                         'front-sticky '(read-only))
+                                   (agent-shell-ui--fragment-help-echo-properties qualified-id)))
       (setq need-space t))
 
     (when label-right
@@ -1121,10 +1140,10 @@ indents a child's header line under its group header."
                :hint "toggle"))
       (setq label-right-end (point))
       (add-text-properties label-right-start label-right-end
-                           `(agent-shell-ui-section label-right
-                                                    help-echo ,(agent-shell-ui--fragment-help-echo qualified-id)
-                                                    read-only t
-                                                    front-sticky (read-only))))
+                           (append (list 'agent-shell-ui-section 'label-right
+                                         'read-only t
+                                         'front-sticky '(read-only))
+                                   (agent-shell-ui--fragment-help-echo-properties qualified-id))))
 
     (when body
       (when (or label-left label-right)
@@ -1141,10 +1160,10 @@ indents a child's header line under its group header."
         (insert (agent-shell-ui--indent-text clean-body body-indent)))
       (setq body-end (point))
       (add-text-properties body-start body-end
-                           `(agent-shell-ui-section body
-                                                    help-echo ,(agent-shell-ui--fragment-help-echo qualified-id)
-                                                    read-only t
-                                                    front-sticky (read-only))))
+                           (append (list 'agent-shell-ui-section 'body
+                                         'read-only t
+                                         'front-sticky '(read-only))
+                                   (agent-shell-ui--fragment-help-echo-properties qualified-id))))
     ;; Indent a group child's header line under its group header.  The
     ;; body already carries its own (deeper) `line-prefix' from above.
     ;; A child with neither label has no header line to indent (the
@@ -1205,13 +1224,14 @@ When NO-UNDO is non-nil, disable undo recording."
            (props `(agent-shell-ui-state ((:qualified-id . ,qualified-id))
                                          read-only t
                                          front-sticky (read-only)))
-           (match (save-mark-and-excursion
-                    (goto-char (point-max))
-                    (text-property-search-backward
-                     'agent-shell-ui-state nil
-                     (lambda (_ state)
-                       (equal (map-elt state :qualified-id) qualified-id))
-                     t))))
+           (match (unless create-new
+                    (save-mark-and-excursion
+                      (goto-char (point-max))
+                      (text-property-search-backward
+                       'agent-shell-ui-state nil
+                       (lambda (_ state)
+                         (equal (map-elt state :qualified-id) qualified-id))
+                       t)))))
       (when text
         (cond
          ;; Append to existing entry.
@@ -1333,6 +1353,13 @@ state-property range first.  User-facing toggling goes through
         (put-text-property (map-elt block :start)
                            (map-elt block :end) 'agent-shell-ui-state state)
         (unless new-collapsed-state
+          ;; Expanding unhid the body's trailing newlines too.  Left
+          ;; visible, a group child added below counts them as its
+          ;; separator (see `agent-shell-ui--required-newlines') and
+          ;; inserts none, so collapsing again pulls that child onto
+          ;; this header line.
+          (agent-shell-ui--apply-trailing-whitespace-invisible
+           (map-elt body :start) (map-elt body :end))
           (save-restriction
             (narrow-to-region (map-elt body :start) (map-elt body :end))
             (run-hooks 'agent-shell-ui-post-expand-fragment-at-point-hook)))))))

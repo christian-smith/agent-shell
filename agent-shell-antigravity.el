@@ -35,6 +35,7 @@
 (require 'acp)
 
 (declare-function agent-shell--indent-string "agent-shell")
+(declare-function agent-shell-welcome-message "agent-shell")
 (declare-function agent-shell--make-acp-client "agent-shell")
 (declare-function agent-shell-make-agent-config "agent-shell")
 (autoload 'agent-shell-make-agent-config "agent-shell")
@@ -212,7 +213,7 @@ Uses `agent-shell-antigravity-authentication' for authentication configuration."
 (defun agent-shell-antigravity--welcome-message (config)
   "Return Antigravity ASCII art using `shell-maker' CONFIG."
   (let ((art (agent-shell--indent-string 4 (agent-shell-antigravity--ascii-art)))
-        (message (string-trim-left (shell-maker-welcome-message config) "\n")))
+        (message (agent-shell-welcome-message config)))
     (concat "\n\n"
             art
             "\n\n"
