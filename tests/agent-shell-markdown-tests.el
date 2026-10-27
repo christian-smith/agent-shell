@@ -4623,6 +4623,20 @@ exercised by the editing in the -all-math-cases test.)"
       (should (equal (buffer-substring-no-properties (point-min) (point-max))
                      "intro\n$$\npending and _literal_\nmore\n")))))
 
+(ert-deftest agent-shell-markdown-render-functions-watermark-before-narrow-test ()
+  "An external frontier behind the watermark leaves earlier text alone."
+  (with-temp-buffer
+    (insert "**behind**\n**tail**\n")
+    ;; Stamp the watermark past `**behind**' so this pass starts at `**tail**'.
+    (put-text-property (point-min) (1+ (point-min))
+                       'agent-shell-markdown-watermark 11)
+    (let ((agent-shell-markdown-render-functions
+           (list (lambda (_context)
+                   (list (cons :watermark 1))))))
+      (agent-shell-markdown-replace-markup :render-images nil))
+    (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                   "**behind**\n**tail**\n"))))
+
 (ert-deftest agent-shell-markdown-fontification-bookkeeping-is-silent-test ()
   "Fontification properties do not fire change hooks or dirty the buffer."
   (dolist (modified '(nil t))

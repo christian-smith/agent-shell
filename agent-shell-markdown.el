@@ -323,7 +323,10 @@ Each function returns an alist (nil for no-op).  Recognised keys:
   :watermark  Buffer position the streaming frontier must not pass,
               so an unclosed delimiter at the buffer tail (e.g. an
               open `$$') is re-examined on the next chunk.  The
-              earliest :watermark across all renderers is honoured.
+              earliest :watermark across all renderers is honoured,
+              and the built-in passes leave text from it onward
+              untouched, so the construct reaches the renderer
+              intact once it closes.
 
 For example, a renderer holding the frontier behind an open `$$'
 at position 1200 returns:
@@ -423,7 +426,7 @@ block is left as literal text."
         (remove-text-properties (point-min) (point-max)
                                 '(agent-shell-markdown-watermark nil))))
     (let ((watermark (agent-shell-markdown--watermark-start))
-          (external-results)
+          (external-watermarks)
           (context)
           (source-blocks)
           (source-ranges)
@@ -454,15 +457,14 @@ block is left as literal text."
         ;; below (and `avoid-ranges') pick them up and the styling passes
         ;; skip them.
         (when agent-shell-markdown-render-functions
-          (setq external-results (agent-shell-markdown--run-render-functions
-                                  context)))
-        ;; An external renderer's unfinished construct must stay literal
-        ;; during this pass, not merely hold back the next pass's watermark.
-        (when-let* ((external-watermarks
-                    (seq-keep (lambda (result) (map-elt result :watermark))
-                              external-results))
-                    (external-watermark (seq-min external-watermarks)))
-          (narrow-to-region (point-min) external-watermark))
+          (setq external-watermarks
+                (seq-keep (lambda (result) (map-elt result :watermark))
+                          (agent-shell-markdown--run-render-functions context))))
+        ;; Keep the built-in passes off any renderer's unfinished
+        ;; construct, so it reaches the renderer intact on a later chunk.
+        (when external-watermarks
+          (narrow-to-region (point-min)
+                            (max (point-min) (seq-min external-watermarks))))
         (setq rendered-ranges (agent-shell-markdown--make-markers
                                (agent-shell-markdown--frozen-ranges)))
         (setq avoid-ranges (agent-shell-markdown-sort-ranges
@@ -559,8 +561,7 @@ block is left as literal text."
         (agent-shell-markdown--pad-rendered-blocks normalization-start))
       (agent-shell-markdown--update-watermark
        :source-blocks source-blocks
-       :external-candidates (seq-keep (lambda (result) (map-elt result :watermark))
-                                      external-results)))))
+       :external-candidates external-watermarks))))
 
 (defun agent-shell-markdown--source-block-ranges (source-blocks)
   "Project SOURCE-BLOCKS to sorted (START . END) marker ranges.
