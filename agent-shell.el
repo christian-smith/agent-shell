@@ -1820,7 +1820,8 @@ Returns nil if no icon should be displayed."
              ((image-supported-file-p icon-filename))
              (image (create-image icon-filename nil nil
                                   :ascent 'center
-                                  :height (frame-char-height))))
+                                  :height (frame-char-height)
+                                  :scale 1)))
     (with-temp-buffer
       (insert-image image)
       (buffer-string))))
@@ -6649,7 +6650,7 @@ keeps entries fresh."
                                           (+ (agent-shell--svg-content-width svg) 16))))
              (let ((result (propertize
                             (format " %s" (with-temp-buffer
-                                            (svg-insert-image svg)
+                                            (insert-image (svg-image svg :scale 1))
                                             (buffer-string)))
                             'help-echo "Open settings menu"
                             'mouse-face 'mode-line-highlight
